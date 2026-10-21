@@ -1,0 +1,64 @@
+# ==========================================
+# NutriGen AI - Security & Clean Repository .gitignore
+# ==========================================
+
+# 1. Virtual Environments (Prevents uploading local OS binaries & libraries)
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# 2. Node & Frontend dependencies
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# 3. Local Databases & Health Records (Security & Privacy)
+# Prevents uploading local SQLite databases with personal test records
+*.db
+*.sqlite3
+nutrigen.db
+
+# 4. Large Machine Learning Model Files (>100MB GitHub limit)
+# GitHub strictly blocks any file exceeding 100 MB.
+# Reproduce or generate models locally using: python ml/training/train_models.py
+*.pkl
+*.pkl.gz
+ml/saved_models/
+backend/models/*.pkl
+
+# 5. Python Bytecode, Caches & Test Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 6. Credentials, Keys & Environment Variables (Security)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.json
+
+# 7. IDE, Editor & OS Artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 8. Agent and System generated logs
+.system_generated/
