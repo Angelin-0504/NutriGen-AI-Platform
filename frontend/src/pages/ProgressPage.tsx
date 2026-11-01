@@ -5,7 +5,7 @@ import {
 } from 'recharts';
 import { 
   CheckCircle2, RefreshCw, Sparkles, Clock, Calendar, 
-  AlertTriangle, ShieldAlert, Save, Plus
+  AlertTriangle, ShieldAlert, Save, Plus, Scale, Flame
 } from 'lucide-react';
 
 interface ProgressPageProps {
@@ -13,11 +13,11 @@ interface ProgressPageProps {
 }
 
 const MEAL_SLOTS = [
-  { id: 'Breakfast', label: 'Breakfast' },
-  { id: 'Mid-Morning Snack', label: 'Mid-Morning Snack' },
-  { id: 'Lunch', label: 'Lunch' },
-  { id: 'Evening Snack', label: 'Evening Snack' },
-  { id: 'Dinner', label: 'Dinner' }
+  { id: 'Breakfast', label: 'Breakfast', defaultCals: 300 },
+  { id: 'Mid-Morning Snack', label: 'Mid-Morning Snack', defaultCals: 150 },
+  { id: 'Lunch', label: 'Lunch', defaultCals: 500 },
+  { id: 'Evening Snack', label: 'Evening Snack', defaultCals: 150 },
+  { id: 'Dinner', label: 'Dinner', defaultCals: 400 }
 ];
 
 const COMMON_SYMPTOMS = [
@@ -40,14 +40,21 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
   const todayStr = new Date().toISOString().split('T')[0];
   const [checkinDate, setCheckinDate] = useState(todayStr);
 
-  // Planned meals for selected day
+  // User profile
+  const [userProfile, setUserProfile] = useState<any | null>(null);
+
+  // Planned meals & calories for selected day
   const [plannedMeals, setPlannedMeals] = useState<Record<string, string>>({});
+  const [plannedMealCalories, setPlannedMealCalories] = useState<Record<string, number>>({});
   
   // Daily checkin form state
   const [mealCheckins, setMealCheckins] = useState<Record<string, {
     status: 'unreported' | 'eaten_as_planned' | 'eaten_with_modifications' | 'replaced' | 'skipped';
     portion_pct: number;
+    planned_food?: string;
+    planned_calories?: number;
     actual_food?: string;
+    actual_calories?: number;
     reason?: string;
     notes?: string;
   }>>({
@@ -61,6 +68,13 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
   const [currentWeight, setCurrentWeight] = useState<number | ''>('');
   const [selectedSymptoms, setSelectedSymptoms] = useState<string[]>([]);
   const [dailyNotes, setDailyNotes] = useState('');
+
+  // Weekly weight tracking state
+  const [weeklyWeights, setWeeklyWeights] = useState<any[]>([]);
+  const [newLogWeight, setNewLogWeight] = useState<string>('');
+  const [newLogWeekNum, setNewLogWeekNum] = useState<number>(1);
+  const [submittingWeeklyWeight, setSubmittingWeeklyWeight] = useState(false);
+  const [weeklyWeightNotice, setWeeklyWeightNotice] = useState<string | null>(null);
 
   // Optional new lab measurement input
   const [newLabTest, setNewLabTest] = useState({
@@ -76,6 +90,21 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
   const [weeklyStats, setWeeklyStats] = useState<any | null>(null);
   const [labHistory, setLabHistory] = useState<any[]>([]);
   const [adaptationNotes, setAdaptationNotes] = useState<string[]>([]);
+
+  const estimateFoodCaloriesClient = (name: string): number => {
+    if (!name) return 220;
+    const clean = name.toLowerCase();
+    if (clean.includes('salad') || clean.includes('soup') || clean.includes('sprout') || clean.includes('cucumber')) return 110;
+    if (clean.includes('fruit') || clean.includes('apple') || clean.includes('banana') || clean.includes('smoothie')) return 130;
+    if (clean.includes('buttermilk') || clean.includes('curd') || clean.includes('milk')) return 95;
+    if (clean.includes('egg') || clean.includes('omelette')) return 145;
+    if (clean.includes('idli') || clean.includes('dosa') || clean.includes('roti') || clean.includes('dal')) return 210;
+    if (clean.includes('rice') || clean.includes('khichdi') || clean.includes('pongal')) return 250;
+    if (clean.includes('paneer') || clean.includes('soya')) return 240;
+    if (clean.includes('chicken') || clean.includes('fish')) return 280;
+    if (clean.includes('biryani') || clean.includes('fried') || clean.includes('burger') || clean.includes('sweet')) return 420;
+    return 220;
+  };
 
   // Load planned meals from saved plan and progress history
   const loadInitialData = async () => {
@@ -96,6 +125,7 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
       const userRes = await fetch(`/api/user/${userId}`);
       if (userRes.ok) {
         const u = await userRes.json();
+        setUserProfile(u);
         if (u.weight) setCurrentWeight(u.weight);
         if (u.symptoms) setSelectedSymptoms(u.symptoms);
       }
@@ -105,18 +135,30 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
       if (planRes.ok) {
         const pData = await planRes.json();
         if (Array.isArray(pData) && pData.length > 0) {
-          // Map days of week
           const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
           const currentDayName = dayNames[new Date().getDay()];
           const matchingDay = pData.find(d => d.day.toLowerCase() === currentDayName.toLowerCase()) || pData[0];
           
           const mealsMap: Record<string, string> = {};
+          const calsMap: Record<string, number> = {};
           if (matchingDay && matchingDay.meals) {
             Object.entries(matchingDay.meals).forEach(([slot, val]: [string, any]) => {
               mealsMap[slot] = (val.foods || []).join(' + ') || 'Nutrient Balanced Food';
+              calsMap[slot] = val.nutrients?.calories || 250;
             });
           }
           setPlannedMeals(mealsMap);
+          setPlannedMealCalories(calsMap);
+        }
+      }
+
+      // 4. Fetch weekly weight records
+      const weightRes = await fetch(`/api/progress/weekly-weight/${userId}`);
+      if (weightRes.ok) {
+        const wData = await weightRes.json();
+        setWeeklyWeights(wData.records || []);
+        if (wData.next_week_number) {
+          setNewLogWeekNum(wData.next_week_number);
         }
       }
     } catch (e: any) {
@@ -133,25 +175,58 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
 
   // Handle meal status update
   const handleMealStatusChange = (slot: string, status: any) => {
-    setMealCheckins(prev => ({
-      ...prev,
-      [slot]: {
-        ...prev[slot],
-        status,
-        actual_food: status === 'replaced' ? prev[slot]?.actual_food || '' : undefined,
-        reason: (status === 'skipped' || status === 'replaced') ? prev[slot]?.reason || '' : undefined
+    const pCals = plannedMealCalories[slot] || 250;
+    setMealCheckins(prev => {
+      const cur = prev[slot] || { status: 'unreported', portion_pct: 100 };
+      let actCals: number | undefined = undefined;
+      if (status === 'eaten_as_planned') {
+        actCals = pCals;
+      } else if (status === 'eaten_with_modifications') {
+        actCals = Math.round(pCals * ((cur.portion_pct || 100) / 100));
+      } else if (status === 'replaced') {
+        const repBase = estimateFoodCaloriesClient(cur.actual_food || '');
+        actCals = Math.round(repBase * ((cur.portion_pct || 100) / 100));
+      } else if (status === 'skipped') {
+        actCals = 0;
       }
-    }));
+      return {
+        ...prev,
+        [slot]: {
+          ...cur,
+          status,
+          planned_calories: pCals,
+          actual_calories: actCals,
+          actual_food: status === 'replaced' ? cur.actual_food || '' : undefined,
+          reason: (status === 'skipped' || status === 'replaced') ? cur.reason || '' : undefined
+        }
+      };
+    });
   };
 
   const handleMealFieldChange = (slot: string, field: string, val: any) => {
-    setMealCheckins(prev => ({
-      ...prev,
-      [slot]: {
-        ...prev[slot],
-        [field]: val
+    const pCals = plannedMealCalories[slot] || 250;
+    setMealCheckins(prev => {
+      const cur = prev[slot] || { status: 'unreported', portion_pct: 100 };
+      const updated = { ...cur, [field]: val };
+      
+      // Recalculate actual calories on portion change or replacement food change
+      if (field === 'portion_pct') {
+        if (updated.status === 'eaten_with_modifications') {
+          updated.actual_calories = Math.round(pCals * (Number(val) / 100));
+        } else if (updated.status === 'replaced') {
+          const repBase = estimateFoodCaloriesClient(updated.actual_food || '');
+          updated.actual_calories = Math.round(repBase * (Number(val) / 100));
+        }
+      } else if (field === 'actual_food' && updated.status === 'replaced') {
+        const repBase = estimateFoodCaloriesClient(String(val));
+        updated.actual_calories = Math.round(repBase * ((updated.portion_pct || 100) / 100));
       }
-    }));
+      
+      return {
+        ...prev,
+        [slot]: updated
+      };
+    });
   };
 
   const toggleSymptom = (symId: string) => {
@@ -199,11 +274,22 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
     setSaveSuccessNotice(null);
     setErrorNotice(null);
 
-    // Prepare payload
+    // Enrich meal check-in payload with planned & actual calories
+    const enrichedCheckins: Record<string, any> = {};
+    MEAL_SLOTS.forEach(slot => {
+      const checkin = mealCheckins[slot.id] || { status: 'unreported' };
+      const pCals = plannedMealCalories[slot.id] || slot.defaultCals;
+      enrichedCheckins[slot.id] = {
+        ...checkin,
+        planned_food: plannedMeals[slot.id] || 'Nutrient Balanced Food',
+        planned_calories: pCals
+      };
+    });
+
     const payload = {
       user_id: userId,
       record_date: checkinDate,
-      meal_checkins: mealCheckins,
+      meal_checkins: enrichedCheckins,
       symptoms: selectedSymptoms,
       lab_measurements: recordedLabs,
       weight: currentWeight ? Number(currentWeight) : undefined,
@@ -220,7 +306,9 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
         throw new Error('Checkin submission failed');
       }
       const data = await res.json();
-      setSaveSuccessNotice(`Check-in for ${data.record_date} saved! Calculated adherence: ${data.adherence_pct}%`);
+      setSaveSuccessNotice(
+        `Check-in for ${data.record_date} saved! Adherence: ${data.adherence_pct}% • Confirmed Intake: ${data.total_actual_calories || 0} kcal (Remaining: ${data.remaining_calorie_allowance || 0} kcal)`
+      );
       
       // Reload history to show updated tables & charts
       await loadInitialData();
@@ -232,38 +320,91 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
     }
   };
 
-  // Compute live preview of adherence % from user inputs
-  const computeLiveAdherence = () => {
+  // Submit Weekly Weight Progress
+  const handleSaveWeeklyWeight = async () => {
+    if (!newLogWeight || isNaN(Number(newLogWeight))) {
+      alert("Please enter a valid scale weight in kg.");
+      return;
+    }
+    setSubmittingWeeklyWeight(true);
+    setWeeklyWeightNotice(null);
+    try {
+      const res = await fetch('/api/progress/weekly-weight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: userId,
+          week_number: newLogWeekNum,
+          weight: Number(newLogWeight)
+        })
+      });
+      if (res.ok) {
+        await res.json();
+        setWeeklyWeightNotice(`Week ${newLogWeekNum} scale weight of ${newLogWeight} kg recorded! Weight-Loss Digital Twin updated.`);
+        setNewLogWeight('');
+        await loadInitialData();
+      }
+    } catch (e: any) {
+      console.error(e);
+    } finally {
+      setSubmittingWeeklyWeight(false);
+    }
+  };
+
+  // Compute live adherence and calories
+  const computeLiveStats = () => {
     let completed = 0;
     let modified = 0;
     let replaced = 0;
     let skipped = 0;
     let pending = 0;
+    let plannedTotal = 0;
+    let actualTotal = 0;
 
-    Object.values(mealCheckins).forEach(item => {
-      if (!item || item.status === 'unreported') pending++;
-      else if (item.status === 'eaten_as_planned') completed++;
-      else if (item.status === 'eaten_with_modifications') modified++;
-      else if (item.status === 'replaced') replaced++;
-      else if (item.status === 'skipped') skipped++;
+    MEAL_SLOTS.forEach(slot => {
+      const pCals = plannedMealCalories[slot.id] || slot.defaultCals;
+      plannedTotal += pCals;
+      const item = mealCheckins[slot.id];
+
+      if (!item || item.status === 'unreported') {
+        pending++;
+      } else if (item.status === 'eaten_as_planned') {
+        completed++;
+        actualTotal += pCals;
+      } else if (item.status === 'eaten_with_modifications') {
+        modified++;
+        actualTotal += Math.round(pCals * ((item.portion_pct || 100) / 100));
+      } else if (item.status === 'replaced') {
+        replaced++;
+        const repCals = estimateFoodCaloriesClient(item.actual_food || '');
+        actualTotal += Math.round(repCals * ((item.portion_pct || 100) / 100));
+      } else if (item.status === 'skipped') {
+        skipped++;
+      }
     });
 
     const totalSlots = MEAL_SLOTS.length;
-    const reportedTotal = completed + modified + replaced + skipped;
     const score = (completed * 100) + (modified * 75) + (replaced * 50);
     const adherencePct = totalSlots > 0 ? Math.round((score / (totalSlots * 100)) * 100) : 0;
+    
+    const calTarget = userProfile?.calorie_target || (userProfile?.gender === 'Male' ? 2200 : 2000);
+    const calDifference = Math.round((actualTotal - calTarget) * 10) / 10;
+    const remainingAllowance = Math.max(0, Math.round((calTarget - actualTotal) * 10) / 10);
 
-    return { completed, modified, replaced, skipped, pending, adherencePct, reportedTotal };
+    return { 
+      completed, modified, replaced, skipped, pending, adherencePct, 
+      plannedTotal, actualTotal, calTarget, calDifference, remainingAllowance 
+    };
   };
 
-  const liveStats = computeLiveAdherence();
+  const liveStats = computeLiveStats();
 
   if (loading && progressHistory.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-24 space-y-4">
         <RefreshCw className="h-10 w-10 text-emerald-600 animate-spin" />
         <span className="text-slate-600 text-sm font-bold">
-          Loading progress records and meal check-in history...
+          Loading progress records, calorie tracking, and check-in history...
         </span>
       </div>
     );
@@ -276,9 +417,9 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
         <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-extrabold uppercase tracking-wider">
           <Clock className="h-3.5 w-3.5 text-emerald-700" /> Real User-Acknowledged Progress Tracking
         </div>
-        <h2 className="text-3xl font-black text-slate-900 tracking-tight">Daily Meal Adherence &amp; Biomarker Check-In</h2>
+        <h2 className="text-3xl font-black text-slate-900 tracking-tight">Daily Meal Adherence, Calorie Intake &amp; Weight Progress</h2>
         <p className="text-sm text-slate-600 max-w-2xl mx-auto">
-          NutriGen AI never assumes adherence merely because a meal plan was generated. Record what you actually ate, track lab measurements, and adapt subsequent recommendations.
+          NutriGen AI never assumes adherence merely because a meal plan was generated. Record what you actually ate, track estimated calorie intake, and monitor weekly scale progress.
         </p>
       </div>
 
@@ -290,24 +431,24 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 text-[11px] text-slate-300">
           <div className="p-2.5 rounded-xl bg-slate-800 border border-slate-700">
-            <span className="font-extrabold text-blue-300 block">[Planned Intake]</span>
-            Target nutrients calculated by linear programming.
+            <span className="font-extrabold text-blue-300 block">[Planned Target]</span>
+            Recommended calories &amp; nutrients from meal optimization.
           </div>
           <div className="p-2.5 rounded-xl bg-slate-800 border border-slate-700">
             <span className="font-extrabold text-emerald-300 block">[Reported Actual]</span>
-            Foods and portions explicitly recorded by you.
+            Calories &amp; portions explicitly acknowledged by you.
           </div>
           <div className="p-2.5 rounded-xl bg-slate-800 border border-slate-700">
-            <span className="font-extrabold text-purple-300 block">[Model Predicted]</span>
-            Deficiency probability from ML ensemble.
+            <span className="font-extrabold text-purple-300 block">[Pending Unreported]</span>
+            Unchecked meals remain pending (never assumed eaten).
           </div>
           <div className="p-2.5 rounded-xl bg-slate-800 border border-slate-700">
-            <span className="font-extrabold text-teal-300 block">[Confirmed Lab]</span>
-            Direct clinical blood test numbers.
+            <span className="font-extrabold text-teal-300 block">[Confirmed Scale]</span>
+            Weekly measured body weight in kilograms.
           </div>
           <div className="p-2.5 rounded-xl bg-slate-800 border border-slate-700">
             <span className="font-extrabold text-amber-300 block">[Digital Twin]</span>
-            Simulated scenario what-if curves.
+            Adaptive energy-balance trajectory projections.
           </div>
         </div>
       </div>
@@ -327,6 +468,68 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
         </div>
       )}
 
+      {/* DAILY CALORIE TRACKER & ADHERENCE BANNER */}
+      <div className="p-5 rounded-3xl bg-gradient-to-r from-slate-900 via-slate-800 to-emerald-950 text-white shadow-lg space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+          <div className="flex items-center gap-2">
+            <Flame className="h-5 w-5 text-amber-400" />
+            <div>
+              <h3 className="text-sm font-extrabold text-white uppercase tracking-wider">
+                Daily Calorie Intelligence &amp; Consumption Tracking
+              </h3>
+              <p className="text-[11px] text-slate-300">
+                Calculates actual calories consumed vs planned recommendations and daily calorie targets.
+              </p>
+            </div>
+          </div>
+          <span className="text-[11px] font-bold text-emerald-300 bg-emerald-900/60 px-3 py-1 rounded-full border border-emerald-700">
+            Target: {liveStats.calTarget} kcal/day
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-center">
+          <div className="p-3 bg-slate-800/80 rounded-2xl border border-slate-700">
+            <span className="text-[10px] text-slate-400 uppercase font-bold block">Planned Calories</span>
+            <span className="text-lg font-black text-slate-200">{liveStats.plannedTotal} kcal</span>
+            <span className="text-[10px] text-slate-400 block">5 Planned Slots</span>
+          </div>
+
+          <div className="p-3 bg-slate-800/80 rounded-2xl border border-slate-700">
+            <span className="text-[10px] text-slate-400 uppercase font-bold block">Actual Consumed</span>
+            <span className="text-lg font-black text-amber-300">{liveStats.actualTotal} kcal</span>
+            <span className="text-[10px] text-amber-400 block font-semibold">Reported Meals</span>
+          </div>
+
+          <div className="p-3 bg-slate-800/80 rounded-2xl border border-slate-700">
+            <span className="text-[10px] text-slate-400 uppercase font-bold block">Calorie Target</span>
+            <span className="text-lg font-black text-blue-300">{liveStats.calTarget} kcal</span>
+            <span className="text-[10px] text-blue-400 block font-semibold">Daily Budget</span>
+          </div>
+
+          <div className="p-3 bg-slate-800/80 rounded-2xl border border-slate-700">
+            <span className="text-[10px] text-slate-400 uppercase font-bold block">Remaining Allowance</span>
+            <span className="text-lg font-black text-emerald-400">{liveStats.remainingAllowance} kcal</span>
+            <span className="text-[10px] text-emerald-500 block font-semibold">Available Today</span>
+          </div>
+
+          <div className="p-3 bg-slate-800/80 rounded-2xl border border-slate-700">
+            <span className="text-[10px] text-slate-400 uppercase font-bold block">Difference vs Target</span>
+            <span className={`text-lg font-black ${liveStats.calDifference > 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+              {liveStats.calDifference > 0 ? `+${liveStats.calDifference}` : `${liveStats.calDifference}`} kcal
+            </span>
+            <span className="text-[10px] text-slate-400 block">
+              {liveStats.calDifference > 0 ? 'Caloric Surplus' : 'Caloric Deficit'}
+            </span>
+          </div>
+
+          <div className="p-3 bg-slate-800/80 rounded-2xl border border-slate-700">
+            <span className="text-[10px] text-slate-400 uppercase font-bold block">Adherence Rate</span>
+            <span className="text-lg font-black text-purple-300">{liveStats.adherencePct}%</span>
+            <span className="text-[10px] text-purple-400 block font-semibold">{liveStats.pending} Pending Meals</span>
+          </div>
+        </div>
+      </div>
+
       {/* SECTION 1: TODAY'S CHECK-IN INTERFACE */}
       <div className="p-6 rounded-3xl bg-white border border-slate-200 shadow-md space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
@@ -336,7 +539,7 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
             </div>
             <div>
               <h3 className="text-base font-extrabold text-slate-900">Daily Meal-by-Meal Check-In</h3>
-              <p className="text-xs text-slate-500">Record your actual consumption for each planned meal slot.</p>
+              <p className="text-xs text-slate-500">Record your actual consumption and portion for each planned meal slot.</p>
             </div>
           </div>
 
@@ -351,57 +554,63 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
           </div>
         </div>
 
-        {/* Live Adherence Calculator Card */}
-        <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 p-4 rounded-2xl bg-slate-50 border border-slate-200 text-center text-xs">
-          <div className="p-2 rounded-xl bg-white border border-slate-100 shadow-xs">
-            <span className="text-[10px] text-slate-400 uppercase font-bold block">Adherence Rate</span>
-            <span className="text-lg font-black text-emerald-600">{liveStats.adherencePct}%</span>
-          </div>
-          <div className="p-2 rounded-xl bg-white border border-slate-100 shadow-xs">
-            <span className="text-[10px] text-emerald-700 uppercase font-bold block">Eaten Planned</span>
-            <span className="text-base font-extrabold text-slate-800">{liveStats.completed}</span>
-          </div>
-          <div className="p-2 rounded-xl bg-white border border-slate-100 shadow-xs">
-            <span className="text-[10px] text-blue-700 uppercase font-bold block">Modified</span>
-            <span className="text-base font-extrabold text-slate-800">{liveStats.modified}</span>
-          </div>
-          <div className="p-2 rounded-xl bg-white border border-slate-100 shadow-xs">
-            <span className="text-[10px] text-purple-700 uppercase font-bold block">Replaced</span>
-            <span className="text-base font-extrabold text-slate-800">{liveStats.replaced}</span>
-          </div>
-          <div className="p-2 rounded-xl bg-white border border-slate-100 shadow-xs">
-            <span className="text-[10px] text-rose-700 uppercase font-bold block">Skipped</span>
-            <span className="text-base font-extrabold text-slate-800">{liveStats.skipped}</span>
-          </div>
-          <div className="p-2 rounded-xl bg-white border border-slate-100 shadow-xs">
-            <span className="text-[10px] text-amber-700 uppercase font-bold block">Pending / Unrecorded</span>
-            <span className="text-base font-extrabold text-amber-700">{liveStats.pending}</span>
-          </div>
-        </div>
-
-        {/* Meal Slots Interactive Form */}
+        {/* Meal Slot Items */}
         <div className="space-y-4">
           {MEAL_SLOTS.map(slot => {
             const checkin = mealCheckins[slot.id] || { status: 'unreported', portion_pct: 100 };
-            const plannedFoodName = plannedMeals[slot.id] || 'Custom Meal';
+            const plannedFoodName = plannedMeals[slot.id] || 'Nutrient Balanced Food';
+            const plannedCals = plannedMealCalories[slot.id] || slot.defaultCals;
+
+            // Live estimated meal calories
+            let liveMealCals: number | null = null;
+            if (checkin.status === 'eaten_as_planned') liveMealCals = plannedCals;
+            else if (checkin.status === 'eaten_with_modifications') liveMealCals = Math.round(plannedCals * ((checkin.portion_pct || 100) / 100));
+            else if (checkin.status === 'replaced') liveMealCals = Math.round(estimateFoodCaloriesClient(checkin.actual_food || '') * ((checkin.portion_pct || 100) / 100));
+            else if (checkin.status === 'skipped') liveMealCals = 0;
 
             return (
               <div 
                 key={slot.id} 
                 className={`p-4 rounded-2xl border transition-all space-y-3 ${
-                  checkin.status === 'eaten_as_planned' ? 'bg-emerald-50/50 border-emerald-300' :
-                  checkin.status === 'eaten_with_modifications' ? 'bg-blue-50/50 border-blue-300' :
-                  checkin.status === 'replaced' ? 'bg-purple-50/50 border-purple-300' :
-                  checkin.status === 'skipped' ? 'bg-rose-50/50 border-rose-300' :
-                  'bg-slate-50/70 border-slate-200'
+                  checkin.status === 'unreported' 
+                    ? 'bg-slate-50 border-slate-200' 
+                    : checkin.status === 'eaten_as_planned'
+                    ? 'bg-emerald-50/40 border-emerald-300'
+                    : checkin.status === 'eaten_with_modifications'
+                    ? 'bg-blue-50/40 border-blue-300'
+                    : checkin.status === 'replaced'
+                    ? 'bg-purple-50/40 border-purple-300'
+                    : 'bg-rose-50/40 border-rose-300'
                 }`}
               >
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div>
-                    <span className="text-xs font-black text-slate-900 uppercase tracking-wider block">
-                      {slot.label}
-                    </span>
-                    <span className="text-xs text-slate-600 font-medium">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-black text-slate-900 uppercase tracking-wider">
+                        {slot.label}
+                      </span>
+                      <span className="text-[11px] font-bold text-slate-500 bg-white px-2 py-0.5 rounded-md border border-slate-200">
+                        Planned: ~{plannedCals} kcal
+                      </span>
+                      {liveMealCals !== null ? (
+                        <span className={`text-[11px] font-extrabold px-2 py-0.5 rounded-md border ${
+                          checkin.status === 'eaten_as_planned'
+                            ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                            : checkin.status === 'eaten_with_modifications'
+                            ? 'bg-blue-100 text-blue-800 border-blue-200'
+                            : checkin.status === 'replaced'
+                            ? 'bg-purple-100 text-purple-800 border-purple-200'
+                            : 'bg-rose-100 text-rose-800 border-rose-200'
+                        }`}>
+                          Estimated Consumed: ~{liveMealCals} kcal
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-extrabold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md border border-amber-200 uppercase">
+                          Pending Check-In
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-600 font-medium block mt-1">
                       Planned Menu: <strong className="text-slate-800">{plannedFoodName}</strong>
                     </span>
                   </div>
@@ -439,7 +648,9 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
                   <div className="p-3 bg-white rounded-xl border border-blue-200 text-xs space-y-2">
                     <div className="flex justify-between items-center">
                       <span className="text-slate-700 font-bold">Approximate Portion Consumed:</span>
-                      <span className="font-extrabold text-blue-700">{checkin.portion_pct}%</span>
+                      <span className="font-extrabold text-blue-700">
+                        {checkin.portion_pct}% (~{liveMealCals} kcal)
+                      </span>
                     </div>
                     <input
                       type="range"
@@ -462,12 +673,14 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
                 {checkin.status === 'replaced' && (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-3 bg-white rounded-xl border border-purple-200 text-xs">
                     <div>
-                      <label className="text-slate-700 font-bold block mb-1">What food did you eat instead?</label>
+                      <label className="text-slate-700 font-bold block mb-1">
+                        What food did you eat instead? (Estimated: ~{liveMealCals} kcal)
+                      </label>
                       <input
                         type="text"
                         value={checkin.actual_food || ''}
                         onChange={e => handleMealFieldChange(slot.id, 'actual_food', e.target.value)}
-                        placeholder="e.g. Vegetable Khichdi or Egg Sandwich"
+                        placeholder="e.g. Sprouted Moong Salad or Vegetable Khichdi"
                         className="w-full p-2 border border-slate-300 rounded-lg font-medium outline-none focus:border-purple-500"
                       />
                     </div>
@@ -490,7 +703,7 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
 
                 {checkin.status === 'skipped' && (
                   <div className="p-3 bg-white rounded-xl border border-rose-200 text-xs">
-                    <label className="text-slate-700 font-bold block mb-1">Reason for Skipping:</label>
+                    <label className="text-slate-700 font-bold block mb-1">Reason for Skipping (0 kcal):</label>
                     <select
                       value={checkin.reason || ''}
                       onChange={e => handleMealFieldChange(slot.id, 'reason', e.target.value)}
@@ -514,35 +727,37 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
           {/* Weight & Symptoms */}
           <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
             <span className="font-extrabold text-slate-900 uppercase tracking-wide block">
-              Daily Vitals &amp; Symptoms Update
+              Daily Scale Weight &amp; Symptoms
             </span>
             <div>
-              <label className="font-bold text-slate-700 block mb-1">Current Body Weight (kg):</label>
+              <label className="font-bold text-slate-700 block mb-1">Today's Scale Weight (kg):</label>
               <input
                 type="number"
-                step="0.5"
+                step="0.1"
                 value={currentWeight}
-                onChange={e => setCurrentWeight(e.target.value ? parseFloat(e.target.value) : '')}
-                placeholder="e.g. 64 kg"
-                className="w-full p-2 border border-slate-300 rounded-xl bg-white font-semibold outline-none focus:border-emerald-500"
+                onChange={e => setCurrentWeight(e.target.value === '' ? '' : Number(e.target.value))}
+                placeholder="e.g. 74.5"
+                className="w-full p-2 border border-slate-300 rounded-xl bg-white font-semibold outline-none"
               />
             </div>
 
             <div>
-              <label className="font-bold text-slate-700 block mb-1">Any symptoms felt today?</label>
+              <label className="font-bold text-slate-700 block mb-1.5">Experienced Symptoms Today:</label>
               <div className="flex flex-wrap gap-1.5">
-                {COMMON_SYMPTOMS.map(s => {
-                  const isSel = selectedSymptoms.includes(s.id);
+                {COMMON_SYMPTOMS.map(sym => {
+                  const isChecked = selectedSymptoms.includes(sym.id);
                   return (
                     <button
-                      key={s.id}
+                      key={sym.id}
                       type="button"
-                      onClick={() => toggleSymptom(s.id)}
+                      onClick={() => toggleSymptom(sym.id)}
                       className={`px-2.5 py-1 rounded-lg font-semibold transition-all ${
-                        isSel ? 'bg-amber-600 text-white shadow-xs' : 'bg-white border border-slate-200 text-slate-700'
+                        isChecked 
+                          ? 'bg-rose-600 text-white shadow-xs' 
+                          : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
                       }`}
                     >
-                      {isSel ? '✓ ' : '+ '} {s.label}
+                      {isChecked ? '✓ ' : ''}{sym.label}
                     </button>
                   );
                 })}
@@ -625,7 +840,7 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
             type="text"
             value={dailyNotes}
             onChange={e => setDailyNotes(e.target.value)}
-            placeholder="e.g. Felt much more energetic in the evening; enjoyed the ragi dosa."
+            placeholder="e.g. Replaced lunch with salad, felt energetic; met calorie target."
             className="w-full p-2.5 border border-slate-200 rounded-xl text-xs bg-slate-50 focus:bg-white outline-none focus:border-emerald-500"
           />
         </div>
@@ -646,7 +861,127 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
         </button>
       </div>
 
-      {/* SECTION 2: ADAPTIVE RECOMMENDATIONS CONNECTED TO PROGRESS */}
+      {/* SECTION 2: WEEKLY WEIGHT PROGRESS TRACKING (CRITICAL FOR WEIGHT LOSS) */}
+      <div className="p-6 rounded-3xl bg-white border border-slate-200 shadow-md space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200">
+              <Scale className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-extrabold text-slate-900">Weekly Body Weight Tracking &amp; Milestones</h3>
+              <p className="text-xs text-slate-500">
+                Log your body weight at the end of every 7 days. Compares with initial, previous, and target weight.
+              </p>
+            </div>
+          </div>
+
+          {/* Quick Weekly Log Form */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500 font-semibold">Week:</span>
+            <input
+              type="number"
+              min="1"
+              max="52"
+              value={newLogWeekNum}
+              onChange={e => setNewLogWeekNum(Number(e.target.value))}
+              className="w-14 p-1.5 border border-slate-300 rounded-xl text-xs font-bold text-center outline-none focus:border-indigo-500"
+            />
+            <input
+              type="number"
+              step="0.1"
+              placeholder="Scale Weight (kg)"
+              value={newLogWeight}
+              onChange={e => setNewLogWeight(e.target.value)}
+              className="w-28 p-1.5 border border-slate-300 rounded-xl text-xs font-bold outline-none focus:border-indigo-500"
+            />
+            <button
+              type="button"
+              onClick={handleSaveWeeklyWeight}
+              disabled={submittingWeeklyWeight || !newLogWeight}
+              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+            >
+              {submittingWeeklyWeight ? 'Saving...' : 'Record Weight'}
+            </button>
+          </div>
+        </div>
+
+        {weeklyWeightNotice && (
+          <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-2xl text-xs font-bold text-indigo-900 flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-indigo-600" />
+            {weeklyWeightNotice}
+          </div>
+        )}
+
+        {/* Weekly Weight Records Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left">
+            <thead>
+              <tr className="bg-slate-50 text-slate-500 font-black uppercase tracking-wider border-b border-slate-200">
+                <th className="py-2.5 px-3">Timeline</th>
+                <th className="py-2.5 px-3">Record Date</th>
+                <th className="py-2.5 px-3">Scale Weight</th>
+                <th className="py-2.5 px-3">Status</th>
+                <th className="py-2.5 px-3">Change vs Initial</th>
+                <th className="py-2.5 px-3">Change vs Previous</th>
+                <th className="py-2.5 px-3">Target Remaining</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+              {weeklyWeights.map((wRec: any, idx: number) => {
+                const isPending = wRec.status === 'pending';
+                const diffInit = wRec.weight_change_from_initial;
+                const diffPrev = wRec.weight_change_from_previous;
+                const remTarget = (wRec.weight && wRec.target_weight) ? Math.round((wRec.weight - wRec.target_weight) * 10) / 10 : '--';
+                return (
+                  <tr key={idx} className="hover:bg-slate-50/70">
+                    <td className="py-2.5 px-3 font-bold text-slate-900">
+                      {wRec.week_number === 0 ? 'Baseline (W0)' : `Week ${wRec.week_number}`}
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-500">{wRec.record_date}</td>
+                    <td className="py-2.5 px-3 font-black text-slate-900">
+                      {isPending ? '--' : `${wRec.weight} kg`}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                        isPending ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'
+                      }`}>
+                        {isPending ? 'Pending' : 'Recorded'}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      {diffInit !== undefined && diffInit !== null && !isPending ? (
+                        <span className={`font-bold ${diffInit < 0 ? 'text-emerald-600' : diffInit > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                          {diffInit > 0 ? `+${diffInit}` : `${diffInit}`} kg
+                        </span>
+                      ) : '--'}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      {diffPrev !== undefined && diffPrev !== null && !isPending ? (
+                        <span className={`font-bold ${diffPrev < 0 ? 'text-emerald-600' : diffPrev > 0 ? 'text-rose-600' : 'text-slate-500'}`}>
+                          {diffPrev > 0 ? `+${diffPrev}` : `${diffPrev}`} kg
+                        </span>
+                      ) : '--'}
+                    </td>
+                    <td className="py-2.5 px-3 text-slate-600 font-semibold">
+                      {isPending ? 'Pending' : remTarget !== '--' ? `${remTarget} kg to target` : '--'}
+                    </td>
+                  </tr>
+                );
+              })}
+              {weeklyWeights.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="py-6 text-center text-slate-400 font-medium">
+                    No weekly weights recorded yet. Enter Week 1 scale weight above!
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* SECTION 3: ADAPTIVE RECOMMENDATIONS CONNECTED TO PROGRESS */}
       {adaptationNotes.length > 0 && (
         <div className="p-6 rounded-3xl bg-emerald-50 border border-emerald-200 shadow-sm space-y-3">
           <div className="flex items-center gap-2 text-emerald-900 font-extrabold text-sm">
@@ -666,7 +1001,7 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
         </div>
       )}
 
-      {/* SECTION 3: HISTORICAL PROGRESS & CHARTS */}
+      {/* SECTION 4: HISTORICAL PROGRESS & CHARTS */}
       <div className="grid lg:grid-cols-2 gap-8">
         {/* Adherence Trends Chart */}
         <div className="p-6 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-4">
@@ -675,7 +1010,7 @@ export default function ProgressPage({ userId }: ProgressPageProps) {
               <h4 className="text-sm font-extrabold text-slate-900">Recorded Adherence History (%)</h4>
               {weeklyStats && (
                 <span className="text-[11px] text-emerald-700 font-bold block mt-0.5">
-                  Avg: {weeklyStats.average_adherence_pct}% • Completed: {weeklyStats.total_completed} • Modified: {weeklyStats.total_modified} • Skipped: {weeklyStats.total_skipped}
+                  Avg: {weeklyStats.average_adherence_pct}% • Avg Calories: {weeklyStats.average_daily_actual_calories || 0} kcal • Pending Meals: {weeklyStats.total_pending}
                 </span>
               )}
             </div>

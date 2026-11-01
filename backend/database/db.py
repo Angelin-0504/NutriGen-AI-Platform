@@ -20,8 +20,18 @@ def ensure_database_schema():
     # Tables to check
     column_defs = {
         "users": [
+            ("email", "VARCHAR"),
+            ("password_hash", "VARCHAR"),
+            ("wants_weight_loss", "BOOLEAN DEFAULT 0"),
+            ("target_weight", "FLOAT"),
+            ("weight_loss_rate", "FLOAT"),
+            ("bmr", "FLOAT"),
+            ("tdee", "FLOAT"),
+            ("calorie_target", "FLOAT"),
+            ("calorie_deficit", "FLOAT"),
             ("saved_meal_plan", "TEXT"),
             ("saved_twin_simulation", "TEXT"),
+            ("saved_weight_loss_simulation", "TEXT"),
         ],
         "progress_records": [
             ("record_date", "VARCHAR"),
@@ -38,6 +48,7 @@ def ensure_database_schema():
         ]
     }
     
+    Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         for table_name, cols in column_defs.items():
             if inspector.has_table(table_name):
@@ -49,6 +60,11 @@ def ensure_database_schema():
                             conn.commit()
                         except Exception as e:
                             print(f"Notice: Column {col_name} on {table_name}: {e}")
+        try:
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email) WHERE email IS NOT NULL"))
+            conn.commit()
+        except Exception:
+            pass
 
 # Automatically ensure schema migration on startup/import
 try:
@@ -62,4 +78,3 @@ def get_db():
         yield db
     finally:
         db.close()
-

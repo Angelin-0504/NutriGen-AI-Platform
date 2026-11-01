@@ -6,7 +6,9 @@ import {
   Activity, 
   Cpu, 
   Clock, 
-  RotateCcw
+  RotateCcw,
+  User as UserIcon,
+  LogOut
 } from 'lucide-react';
 
 import LandingPage from './pages/LandingPage';
@@ -17,8 +19,26 @@ import FamilyDashboard from './pages/FamilyDashboard';
 import DigitalTwin from './pages/DigitalTwin';
 import ProgressPage from './pages/ProgressPage';
 import AdminDashboard from './pages/AdminDashboard';
+import AuthModal from './pages/AuthModal';
 
 export default function App() {
+  const [user, setUser] = useState<any | null>(() => {
+    try {
+      const saved = localStorage.getItem('nutrigen_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [, setToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('nutrigen_auth_token');
+    } catch {
+      return null;
+    }
+  });
+
   const [userId, setUserId] = useState<number | null>(() => {
     try {
       const saved = localStorage.getItem('nutrigen_user_id');
@@ -27,6 +47,7 @@ export default function App() {
       return null;
     }
   });
+
   const [assessmentResults, setAssessmentResults] = useState<any | null>(() => {
     try {
       const saved = localStorage.getItem('nutrigen_assessment_results');
@@ -35,6 +56,7 @@ export default function App() {
       return null;
     }
   });
+
   const [view, setView] = useState<string>(() => {
     try {
       const savedView = localStorage.getItem('nutrigen_view') || 'landing';
@@ -42,7 +64,7 @@ export default function App() {
       if (['bioavailability', 'dataset'].includes(savedView)) {
         return 'landing';
       }
-      if (['dashboard', 'mealplan', 'digitaltwin', 'progress'].includes(savedView) && !savedUser) {
+      if (['assessment', 'dashboard', 'mealplan', 'digitaltwin', 'progress'].includes(savedView) && !savedUser) {
         return 'landing';
       }
       return savedView;
@@ -50,15 +72,65 @@ export default function App() {
       return 'landing';
     }
   });
+
   const [assessmentLoading, setAssessmentLoading] = useState<boolean>(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
+
+  const openAuthModal = (mode: 'login' | 'register' = 'login') => {
+    setAuthModalMode(mode);
+    setIsAuthModalOpen(true);
+  };
+
+  const handleAuthSuccess = (userData: any, authToken: string) => {
+    setUser(userData);
+    setToken(authToken);
+    setUserId(userData.id);
+    localStorage.setItem('nutrigen_user', JSON.stringify(userData));
+    localStorage.setItem('nutrigen_auth_token', authToken);
+    localStorage.setItem('nutrigen_user_id', String(userData.id));
+
+    if (userData.latest_prediction) {
+      setAssessmentResults(userData.latest_prediction);
+      localStorage.setItem('nutrigen_assessment_results', JSON.stringify(userData.latest_prediction));
+      localStorage.setItem('nutrigen_view', 'dashboard');
+      setView('dashboard');
+    } else {
+      localStorage.setItem('nutrigen_view', 'assessment');
+      setView('assessment');
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignored
+    }
+    setUser(null);
+    setToken(null);
+    setUserId(null);
+    setAssessmentResults(null);
+    localStorage.removeItem('nutrigen_user');
+    localStorage.removeItem('nutrigen_auth_token');
+    localStorage.removeItem('nutrigen_user_id');
+    localStorage.removeItem('nutrigen_assessment_results');
+    localStorage.setItem('nutrigen_view', 'landing');
+    setView('landing');
+  };
 
   const handleAssessmentSubmit = async (formData: any) => {
     setAssessmentLoading(true);
     try {
+      const payload = {
+        ...formData,
+        user_id: userId || undefined
+      };
+
       const res = await fetch('/api/assessment', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       
@@ -72,6 +144,18 @@ export default function App() {
       localStorage.setItem('nutrigen_user_id', String(data.user_id));
       localStorage.setItem('nutrigen_assessment_results', JSON.stringify(data));
       localStorage.setItem('nutrigen_view', 'dashboard');
+      
+      if (user) {
+        const updated = {
+          ...user,
+          has_profile: true,
+          wants_weight_loss: Boolean(formData.wants_weight_loss),
+          latest_prediction: data
+        };
+        setUser(updated);
+        localStorage.setItem('nutrigen_user', JSON.stringify(updated));
+      }
+
       setView('dashboard');
     } catch (e) {
       console.error(e);
@@ -91,6 +175,11 @@ export default function App() {
   };
 
   const changeView = (newView: string) => {
+    // Protected routes require authentication
+    if (!user && ['assessment', 'dashboard', 'mealplan', 'progress'].includes(newView)) {
+      openAuthModal('register');
+      return;
+    }
     setView(newView);
     localStorage.setItem('nutrigen_view', newView);
   };
@@ -115,7 +204,7 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="flex items-center gap-1.5 flex-wrap">
+        <nav className="flex items-center gap-2 flex-wrap">
           {/* Always visible tabs */}
           <button
             onClick={() => setView('landing')}
@@ -201,24 +290,88 @@ export default function App() {
 
               <button
                 onClick={resetSession}
-                title="Reset Assessment & Start Over"
+                title="Reset Active Profile & Assessment"
                 className="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-all flex items-center gap-1 ml-1 border border-transparent hover:border-rose-200"
               >
                 <RotateCcw className="h-3.5 w-3.5" /> Reset
               </button>
             </>
           )}
+
+          {/* User Authentication & Account Actions */}
+          <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200">
+            {user ? (
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-slate-100 border border-slate-200/80 text-xs font-bold text-slate-800">
+                  <UserIcon className="h-3.5 w-3.5 text-emerald-600" />
+                  <span className="max-w-[130px] truncate">{user.name}</span>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-all flex items-center gap-1"
+                  title="Sign Out of Session"
+                >
+                  <LogOut className="h-3.5 w-3.5" /> Logout
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => openAuthModal('login')}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 transition-all"
+                >
+                  Sign In
+                </button>
+                <button
+                  onClick={() => openAuthModal('register')}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-all flex items-center gap-1"
+                >
+                  Create Account
+                </button>
+              </div>
+            )}
+          </div>
         </nav>
       </header>
 
       {/* Main View Area */}
       <main className="flex-grow pb-16 bg-slate-50/70">
         {view === 'landing' && (
-          <LandingPage onStart={() => changeView('assessment')} setView={changeView} />
+          <LandingPage 
+            onStart={() => changeView('assessment')} 
+            setView={changeView} 
+            onOpenAuth={openAuthModal}
+            currentUser={user}
+          />
         )}
         
         {view === 'assessment' && (
-          <UserAssessment onSubmit={handleAssessmentSubmit} loading={assessmentLoading} />
+          user ? (
+            <UserAssessment 
+              onSubmit={handleAssessmentSubmit} 
+              loading={assessmentLoading} 
+              currentUser={user}
+            />
+          ) : (
+            <div className="max-w-xl mx-auto my-16 p-8 bg-white rounded-3xl border border-slate-200 text-center shadow-lg">
+              <h3 className="text-xl font-bold text-slate-800 mb-2">Account Required</h3>
+              <p className="text-slate-600 text-sm mb-6">Please create an account or sign in to start your personalized nutrition assessment.</p>
+              <div className="flex justify-center gap-3">
+                <button 
+                  onClick={() => openAuthModal('login')}
+                  className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl font-semibold transition-all cursor-pointer"
+                >
+                  Sign In
+                </button>
+                <button 
+                  onClick={() => openAuthModal('register')}
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold shadow-md transition-all cursor-pointer"
+                >
+                  Create Account
+                </button>
+              </div>
+            </div>
+          )
         )}
         
         {view === 'dashboard' && (
@@ -229,6 +382,7 @@ export default function App() {
               deficiencies={assessmentResults.deficiences}
               explanations={assessmentResults.explanations}
               preventionScore={assessmentResults.prevention_score}
+              weightLoss={assessmentResults.weight_loss}
               onNavigate={changeView}
               onDownloadReport={downloadPdfReport}
             />
@@ -315,6 +469,14 @@ export default function App() {
           Disclaimer: This system draws inferences using model parameters aligned to NHANES and clinical guidelines. It does not provide medical services, dietary therapies, or diagnose illnesses. All measurements, advice, and charts must be validated clinically under professional medical guidance.
         </p>
       </footer>
+
+      {/* Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSuccess={handleAuthSuccess}
+        initialMode={authModalMode}
+      />
     </div>
   );
 }

@@ -15,6 +15,7 @@ interface DashboardProps {
   deficiencies: NutrientRisk[];
   explanations: any; // SHAP explanations
   preventionScore: number;
+  weightLoss?: any;
   onNavigate: (view: string) => void;
   onDownloadReport: () => void;
 }
@@ -33,6 +34,7 @@ export default function Dashboard({
   deficiencies,
   explanations = {},
   preventionScore,
+  weightLoss,
   onNavigate,
   onDownloadReport
 }: DashboardProps) {
@@ -101,6 +103,88 @@ export default function Dashboard({
           <Download className="h-4 w-4 text-white" /> Download PDF Medical Report
         </button>
       </div>
+
+      {/* Weight Management & Calorie Intelligence Section (When Active) */}
+      {weightLoss?.wants_weight_loss && (
+        <div className="p-6 rounded-3xl bg-white border border-emerald-200/90 shadow-sm mb-8 space-y-4">
+          <div className="flex flex-wrap justify-between items-center gap-2 border-b border-slate-100 pb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-emerald-100 text-emerald-800 rounded-xl">
+                <Sparkles className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900">
+                  Weight-Loss &amp; Calorie Management Intelligence
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Integrated calorie targets synchronized with nutrient deficiency prevention.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => onNavigate('mealplan')}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all shadow-xs"
+            >
+              <span>View Calorie-Aware Meal Plan</span>
+              <ArrowRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
+              <span className="text-[10px] uppercase font-bold text-slate-500 block">Current &rarr; Target</span>
+              <span className="text-base font-black text-slate-900">
+                {weightLoss.current_weight} kg &rarr; {weightLoss.target_weight} kg
+              </span>
+              <span className="text-[11px] text-emerald-700 font-extrabold block mt-0.5">
+                Goal: Lose {weightLoss.weight_to_lose} kg
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
+              <span className="text-[10px] uppercase font-bold text-slate-500 block">Metabolism (BMR &amp; TDEE)</span>
+              <span className="text-base font-black text-sky-900">
+                {weightLoss.tdee} kcal
+              </span>
+              <span className="text-[10px] text-slate-400 block mt-0.5">
+                Basal rate: {weightLoss.bmr} kcal/day
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200">
+              <span className="text-[10px] uppercase font-bold text-amber-700 block">Safe Calorie Deficit</span>
+              <span className="text-base font-black text-amber-900">
+                -{weightLoss.calorie_deficit} kcal/day
+              </span>
+              <span className="text-[10px] text-amber-700 block mt-0.5">
+                Rate: {weightLoss.weight_loss_rate || 0.5} kg / week
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-300">
+              <span className="text-[10px] uppercase font-bold text-emerald-800 block">Daily Calorie Target</span>
+              <span className="text-base font-black text-emerald-950">
+                {weightLoss.calorie_target} kcal/day
+              </span>
+              <span className="text-[10px] text-emerald-700 font-extrabold block mt-0.5">
+                Est. Duration: ~{weightLoss.estimated_weeks || '—'} wks
+              </span>
+            </div>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 text-xs text-slate-600 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+              <span>
+                <b>Dual Optimization Strategy:</b> Recommendations satisfy both your safe daily calorie allowance ({weightLoss.calorie_target} kcal) and address the {sortedDef.length} predicted nutrient deficiency risks through nutrient-dense regional recipes.
+              </span>
+            </div>
+            <span className="text-[10px] text-slate-400 italic shrink-0">
+              Validated Mifflin-St Jeor formula
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-3 gap-8 mb-8">
         {/* Left Column: General Prevention Score & BMI */}

@@ -6,11 +6,26 @@ from sqlalchemy.orm import Session
 from backend.database.models import FoodItem, FoodInteraction
 from backend.database.db import SessionLocal
 
-def get_dietary_rda(age: int, gender: str, risk_profile: dict) -> dict:
+def get_dietary_rda(age: int, gender: str, risk_profile: dict, calorie_target: float = None, wants_weight_loss: bool = False) -> dict:
+    """
+    Returns baseline daily target RDAs, adjusted dynamically for elevated deficiency risks.
+    Mode 1 (Deficiency Only): Uses standard maintenance caloric intake without calorie deficit.
+    Mode 2 (Weight Loss): Uses calibrated safe calorie target and elevated protein for lean tissue preservation.
+    """
+    gender_clean = (gender or "").strip().lower()
+    default_calories = 2200.0 if gender_clean == "male" else 2000.0
+    
+    if wants_weight_loss:
+        cal_val = float(calorie_target) if (calorie_target and calorie_target > 0) else (default_calories - 500.0)
+        prot_val = 75.0 if gender_clean == "male" else 68.0  # Elevated protein to preserve muscle & increase satiety
+    else:
+        cal_val = default_calories  # Standard maintenance, no deficit imposed
+        prot_val = 60.0 if gender_clean == "male" else 55.0
+    
     # Baseline daily targets
     targets = {
-        "calories": 2000.0,
-        "protein": 55.0,     # g
+        "calories": round(cal_val, 1),
+        "protein": prot_val,  # g
         "iron": 15.0,        # mg 
         "calcium": 1000.0,    # mg
         "vitamin_d": 15.0,    # mcg
@@ -21,7 +36,7 @@ def get_dietary_rda(age: int, gender: str, risk_profile: dict) -> dict:
     
     # Adjust targets dynamically for predicted deficiency risks (> 30% MODERATE onwards)
     if risk_profile.get("iron_deficiency", 0) > 0.30:
-        targets["iron"] = 28.0 if gender == "Female" else 22.0
+        targets["iron"] = 28.0 if gender_clean == "female" else 22.0
     if risk_profile.get("vitamin_d_deficiency", 0) > 0.30:
         targets["vitamin_d"] = 30.0
     if risk_profile.get("vitamin_b12_deficiency", 0) > 0.30:
@@ -60,6 +75,7 @@ def optimize_daily_diet(
     disliked = user_constraints.get("disliked_foods", [])
     liked = user_constraints.get("liked_foods", [])
     daily_budget = user_constraints.get("daily_budget", 150.0)
+    wants_weight_loss = bool(user_constraints.get("wants_weight_loss"))
     
     # Filter by diet type
     if diet == "Vegan":
@@ -135,10 +151,15 @@ def optimize_daily_diet(
     nutrients = ["calories", "protein", "iron", "calcium", "vitamin_d", "vitamin_b12", "magnesium", "zinc"]
     shortfalls = pulp.LpVariable.dicts("Shortfall", nutrients, lowBound=0.0)
     
-    # Constraints on Qty: if used, min 30g, max 200g (or 350g for dairy/fruits)
+    # Constraints on Qty: if used, min 30g, max 200g (or 350g for dairy/fruits/vegetables)
     for fid in food_ids:
         food = food_map[fid]
-        mx = 3.5 if food.category in ["Dairy", "Fruit", "Vegetable"] else 2.0
+        if wants_weight_loss:
+            # Mode 2: Higher volume for vegetables/fruits/dairy, controlled portions for calorie-dense items
+            mx = 3.5 if food.category in ["Dairy", "Fruit", "Vegetable"] else (1.5 if food.calories > 200.0 else 2.0)
+        else:
+            # Mode 1: Standard balanced portions
+            mx = 3.5 if food.category in ["Dairy", "Fruit", "Vegetable"] else 2.5
         prob += x[fid] >= 0.3 * use[fid]
         prob += x[fid] <= mx * use[fid]
         
@@ -160,6 +181,36 @@ def optimize_daily_diet(
     for nut in nutrients:
         prob += pulp.lpSum(x[fid] * getattr(food_map[fid], nut) for fid in food_ids) + shortfalls[nut] >= rda_targets[nut]
         
+    # Distinct Goal-Based Recommendation Logic:
+    # Mode 2 (Weight Loss + Deficiency): Prioritize high satiety, high protein/mineral-to-calorie density, lower caloric density
+    # Mode 1 (Deficiency Only): Wholesome dietary variety, balanced traditional staples without caloric deficit penalty
+    goal_term = 0.0
+    if wants_weight_loss:
+        # 1. Satiety & Nutrient-Density Reward: favors foods providing high protein & minerals per calorie
+        satiety_bonus = pulp.lpSum(
+            x[fid] * (
+                ((food_map[fid].protein * 5.0) + (food_map[fid].iron * 2.0) + (food_map[fid].magnesium * 0.1)) 
+                / max(35.0, food_map[fid].calories) * 45.0
+            )
+            for fid in food_ids
+        )
+        # 2. Caloric Density Penalty: discourages energy-dense foods (> 180 kcal/100g)
+        cal_density_pen = pulp.lpSum(
+            use[fid] * ((food_map[fid].calories / 100.0) * 20.0)
+            for fid in food_ids if food_map[fid].calories > 180.0
+        )
+        # 3. Calorie Ceiling Constraint
+        excess_cal = pulp.LpVariable("ExcessCal", lowBound=0.0)
+        prob += pulp.lpSum(x[fid] * food_map[fid].calories for fid in food_ids) - excess_cal <= rda_targets["calories"] + 25.0
+        goal_term = cal_density_pen + (excess_cal * 10.0) - satiety_bonus
+    else:
+        # Mode 1: Reward traditional whole grains, balanced legumes, and wholesome staples for steady energy
+        staple_bonus = pulp.lpSum(
+            x[fid] * (22.0 if food_map[fid].category in ["Grain", "Legume", "Dairy"] else 8.0)
+            for fid in food_ids
+        )
+        goal_term = -staple_bonus
+
     # Objective function:
     # 1. Minimize total cost
     cost_term = pulp.lpSum(x[fid] * food_map[fid].cost for fid in food_ids)
@@ -183,7 +234,7 @@ def optimize_daily_diet(
             
     variety_term = pulp.lpSum(variety_penalties) if variety_penalties else 0.0
     
-    prob += cost_term + penalty_term + variety_term - preference_term
+    prob += cost_term + penalty_term + variety_term + goal_term - preference_term
 
     # Solve
     solver = pulp.PULP_CBC_CMD(msg=False)
@@ -350,6 +401,38 @@ def structure_meals(optimized_day: dict) -> dict:
         
     return meal_plan
 
+def find_deficiency_foods_for_day(items: list, risk_profile: dict) -> list:
+    """Finds recommended items that specifically address the user's elevated nutrient risks."""
+    nut_keys = {
+        "iron_deficiency": ("iron", "Iron"),
+        "vitamin_d_deficiency": ("vitamin_d", "Vitamin D"),
+        "vitamin_b12_deficiency": ("vitamin_b12", "Vitamin B12"),
+        "calcium_deficiency": ("calcium", "Calcium"),
+        "magnesium_deficiency": ("magnesium", "Magnesium"),
+        "zinc_deficiency": ("zinc", "Zinc")
+    }
+    elevated_nutrients = []
+    for def_key, (nut_field, display_name) in nut_keys.items():
+        if risk_profile.get(def_key, 0) > 0.30:
+            elevated_nutrients.append((def_key, nut_field, display_name))
+            
+    recs = []
+    seen_foods = set()
+    for _, nut_field, display_name in elevated_nutrients:
+        sorted_items = sorted(items, key=lambda it: it.get(nut_field, 0.0), reverse=True)
+        top_items = [it for it in sorted_items if it.get(nut_field, 0.0) > 0.05][:2]
+        for it in top_items:
+            food_name = it.get("name")
+            if food_name not in seen_foods:
+                seen_foods.add(food_name)
+                recs.append({
+                    "nutrient": display_name,
+                    "food": food_name,
+                    "contribution": f"{it.get(nut_field, 0.0)} ({it.get('serving_size', '1 serving')})",
+                    "reason": f"Rich source targeting predicted {display_name} risk."
+                })
+    return recs
+
 def generate_7day_meal_plan(
     db: Session, 
     user_profile: dict, 
@@ -359,11 +442,16 @@ def generate_7day_meal_plan(
     """
     Generates varied meal selections across Monday through Sunday.
     Prevents identical daily menus and avoids repeating the same meals on consecutive days.
+    Respects daily calorie targets and deficiency risk requirements.
     """
+    wants_wl = bool(user_profile.get("wants_weight_loss"))
+    cal_target = user_profile.get("calorie_target") if wants_wl else None
     rda_targets = get_dietary_rda(
         user_profile.get("age", 28), 
         user_profile.get("gender", "Female"), 
-        risk_profile
+        risk_profile,
+        calorie_target=cal_target,
+        wants_weight_loss=wants_wl
     )
     
     weekly_plan = []
@@ -375,9 +463,9 @@ def generate_7day_meal_plan(
     
     for ind, day in enumerate(days):
         day_targets = rda_targets.copy()
-        # Introduce slight day-specific nutritional variation (+/- 40-80 kcal) to model realistic day-to-day metabolic variance
-        day_variation = (math.sin(ind * 1.2)) * 60.0
-        day_targets["calories"] = round(day_targets["calories"] + day_variation, 1)
+        # Introduce slight day-specific nutritional variation (+/- 30-50 kcal) to model realistic day-to-day variance
+        day_variation = (math.sin(ind * 1.2)) * 35.0
+        day_targets["calories"] = max(1200.0, round(day_targets["calories"] + day_variation, 1))
         
         opt_res = optimize_daily_diet(
             db, 
@@ -394,12 +482,6 @@ def generate_7day_meal_plan(
         chosen_ids = set(f["id"] for f in opt_res["items"] if f["id"] > 0)
         chosen_names = sorted([f["name"] for f in opt_res["items"]])
         signature = "-".join(chosen_names)
-        
-        # If identical signature matches yesterday and alternatives exist, perturb
-        if signature in previous_day_signatures:
-            # Mark existing foods with extra penalty for next cycle
-            pass
-            
         previous_day_signatures.append(signature)
         
         # Update rotation tracking for next day
@@ -408,16 +490,25 @@ def generate_7day_meal_plan(
             weekly_usage_counts[fid] = weekly_usage_counts.get(fid, 0) + 1
             
         unique_foods = len(set(f["name"] for f in opt_res["items"]))
+        actual_calories = opt_res["nutrients"].get("calories", 0.0)
+        remaining_cal = max(0.0, round(day_targets["calories"] - actual_calories, 1))
+        deficiency_recs = find_deficiency_foods_for_day(opt_res["items"], risk_profile)
         
         weekly_plan.append({
             "day": day,
             "meals": structured,
             "totals": opt_res["nutrients"],
-            "rda_targets": rda_targets,
+            "rda_targets": day_targets,
+            "calorie_target": round(day_targets["calories"], 1),
+            "total_calories": round(actual_calories, 1),
+            "remaining_calories": remaining_cal,
+            "goal_mode": "weight_loss_deficiency" if wants_wl else "deficiency_nutrition",
+            "goal_mode_label": "Mode 2: Weight Loss + Nutrient Deficiency Prediction" if wants_wl else "Mode 1: Nutrient Deficiency Prediction + Personalized Nutrition",
+            "wants_weight_loss": wants_wl,
+            "deficiency_recommendations": deficiency_recs,
             "cost": opt_res["total_cost"],
             "unique_foods_count": unique_foods,
             "limitation_note": opt_res.get("limitation_note")
         })
         
     return weekly_plan
-

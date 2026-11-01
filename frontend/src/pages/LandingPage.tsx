@@ -3,9 +3,11 @@ import { Activity, ShieldAlert, Sparkles, Users, RefreshCw, Cpu, BookOpen } from
 interface LandingPageProps {
   onStart: () => void;
   setView: (view: string) => void;
+  onOpenAuth?: (mode: 'login' | 'register') => void;
+  currentUser?: any;
 }
 
-export default function LandingPage({ onStart, setView }: LandingPageProps) {
+export default function LandingPage({ onStart, setView, onOpenAuth, currentUser }: LandingPageProps) {
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
       {/* Hero Section */}
@@ -19,21 +21,36 @@ export default function LandingPage({ onStart, setView }: LandingPageProps) {
             NutriGen AI
           </h1>
           <p className="text-lg text-emerald-50 mb-8 max-w-2xl mx-auto font-medium leading-relaxed">
-            An Explainable Multi-Nutrient Deficiency Prediction and Personalized Dietary Intelligence System with Family Nutrition Optimization and Digital Twin Simulation.
+            An Explainable Multi-Nutrient Deficiency Prediction and Personalized Dietary Intelligence System with Weight-Loss Management, Family Nutrition Optimization, and Digital Twin Simulation.
           </p>
           
           <div className="flex flex-wrap justify-center gap-4">
             <button
-              onClick={onStart}
-              className="px-8 py-4 rounded-2xl bg-white text-emerald-800 hover:bg-emerald-50 font-extrabold text-base shadow-lg shadow-emerald-950/20 transition-all transform hover:-translate-y-0.5 active:translate-y-0"
+              onClick={currentUser ? onStart : undefined}
+              disabled={!currentUser}
+              aria-disabled={!currentUser}
+              title={!currentUser ? 'Please create an account or sign in to start nutrition assessment.' : (currentUser.has_profile ? 'Continue Assessment' : 'Start Nutrition Assessment')}
+              className={`px-8 py-4 rounded-2xl font-extrabold text-base shadow-lg transition-all ${
+                currentUser
+                  ? 'bg-white text-emerald-800 hover:bg-emerald-50 shadow-emerald-950/20 transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer'
+                  : 'bg-white/60 text-emerald-950/50 cursor-not-allowed opacity-60 shadow-none'
+              }`}
             >
-              Start Nutrition Assessment
+              {currentUser ? (currentUser.has_profile ? 'Continue Assessment' : 'Start Nutrition Assessment') : 'Start Nutrition Assessment'}
             </button>
+            {!currentUser && onOpenAuth && (
+              <button
+                onClick={() => onOpenAuth('register')}
+                className="px-8 py-4 rounded-2xl bg-emerald-900/40 backdrop-blur-md border border-white/30 hover:bg-emerald-900/60 text-white font-extrabold text-base transition-colors cursor-pointer"
+              >
+                Create Account
+              </button>
+            )}
             <button
               onClick={() => setView('admin')}
-              className="px-8 py-4 rounded-2xl bg-emerald-700/60 backdrop-blur-md border border-white/30 hover:bg-emerald-700/80 text-white font-semibold text-base transition-colors"
+              className="px-8 py-4 rounded-2xl bg-emerald-700/60 backdrop-blur-md border border-white/30 hover:bg-emerald-700/80 text-white font-semibold text-base transition-colors cursor-pointer"
             >
-              Explore Research & ML Models
+              Explore Research &amp; ML Models
             </button>
           </div>
         </div>

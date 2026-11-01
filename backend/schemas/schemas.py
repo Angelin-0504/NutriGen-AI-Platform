@@ -2,6 +2,44 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 
+# --- Authentication Schemas ---
+class UserRegisterRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    email: str = Field(..., max_length=255)
+    password: str = Field(..., min_length=8)
+    confirm_password: str = Field(..., min_length=8)
+
+class UserLoginRequest(BaseModel):
+    email: Optional[str] = None
+    username: Optional[str] = None
+    password: str
+
+class AuthUserResponse(BaseModel):
+    id: int
+    name: str
+    email: Optional[str] = None
+    has_profile: bool = False
+    wants_weight_loss: bool = False
+    profile: Optional[Dict[str, Any]] = None
+    latest_prediction: Optional[Dict[str, Any]] = None
+    saved_meal_plan: Optional[List[Dict[str, Any]]] = None
+    token: Optional[str] = None
+
+# --- Weight Loss Schemas ---
+class WeightLossDetails(BaseModel):
+    wants_weight_loss: bool
+    current_weight: float
+    target_weight: Optional[float] = None
+    weight_to_lose: Optional[float] = None
+    weight_loss_rate: Optional[float] = None
+    bmr: Optional[float] = None
+    tdee: Optional[float] = None
+    calorie_deficit: Optional[float] = None
+    calorie_target: Optional[float] = None
+    estimated_weeks: Optional[float] = None
+    safety_note: Optional[str] = None
+    clinical_notice: Optional[str] = None
+
 # --- Assessment & User Schemas ---
 class UserAssessmentRequest(BaseModel):
     name: str = Field(..., example="Demo User")
@@ -20,16 +58,22 @@ class UserAssessmentRequest(BaseModel):
     allergies: List[str] = [] # allergies list
     liked_foods: List[str] = []
     disliked_foods: List[str] = []
+    
+    # Optional authentication and weight loss extension fields
+    user_id: Optional[int] = None
+    wants_weight_loss: Optional[bool] = False
+    target_weight: Optional[float] = None
+    weight_loss_rate: Optional[float] = 0.5
 
 class UserResponse(BaseModel):
     id: int
     name: str
-    age: int
-    gender: str
-    bmi: float
-    region: str
-    diet_type: str
-    daily_food_budget: float
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    bmi: Optional[float] = None
+    region: Optional[str] = None
+    diet_type: Optional[str] = None
+    daily_food_budget: Optional[float] = None
     created_at: datetime
     
     class Config:
@@ -49,6 +93,7 @@ class AssessmentResponse(BaseModel):
     deficiences: List[NutrientRisk]
     explanations: Dict[str, Dict] # SHAP explanations
     prevention_score: float
+    weight_loss: Optional[WeightLossDetails] = None
 
 # --- Family Schemas ---
 class FamilyMemberCreate(BaseModel):
@@ -86,8 +131,17 @@ class MealCheckinItem(BaseModel):
     planned_food: Optional[str] = None
     actual_food: Optional[str] = None
     portion_pct: Optional[float] = 100.0
+    planned_calories: Optional[float] = 0.0
+    actual_calories: Optional[float] = None
     reason: Optional[str] = None
     notes: Optional[str] = None
+
+class WeeklyWeightCheckinRequest(BaseModel):
+    user_id: int
+    week_number: int = 1
+    record_date: Optional[str] = None
+    weight: Optional[float] = None  # None for pending
+    notes: Optional[str] = ""
 
 class DailyProgressCheckinRequest(BaseModel):
     user_id: int
@@ -116,3 +170,9 @@ class TwinSimulationRequest(BaseModel):
     duration_weeks: int = 12
     dietary_choice: str = "standard_recommended"
 
+class WeightLossTwinSimulationRequest(BaseModel):
+    user_id: int
+    adherence_score: Optional[float] = None
+    duration_weeks: int = 12
+    target_weight: Optional[float] = None
+    calorie_target: Optional[float] = None

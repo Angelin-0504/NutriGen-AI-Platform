@@ -268,12 +268,16 @@ export default function MealPlanPage({ userId }: MealPlanPageProps) {
         });
         
         const newDayCost = Math.max(0, Number((dPlan.cost - oldCost + updatedFood.cost).toFixed(2)));
+        const targetCal = dPlan.calorie_target || dPlan.rda_targets?.calories || 2000;
+        const remainingCal = Math.max(0, Number((targetCal - newTotals["calories"]).toFixed(1)));
 
         return {
           ...dPlan,
           meals,
           totals: newTotals,
-          cost: newDayCost
+          cost: newDayCost,
+          total_calories: newTotals["calories"],
+          remaining_calories: remainingCal
         };
       });
 
@@ -415,6 +419,72 @@ export default function MealPlanPage({ userId }: MealPlanPageProps) {
         })}
       </div>
 
+      {/* Daily Calorie & Weight-Loss Guidance Banner */}
+      <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-xs flex flex-wrap justify-between items-center gap-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white shadow-xs">
+            <Sparkles className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-extrabold text-slate-900">{activeDayPlan.day} Nutritional Targets</span>
+              {userProfile?.wants_weight_loss && (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold uppercase">
+                  Weight-Loss Mode
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500">Calorie budget and deficiency-targeted food selections.</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 text-center flex-wrap">
+          <div className="px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-200">
+            <span className="text-[10px] uppercase font-bold text-slate-500 block">Total Calories</span>
+            <span className="text-sm font-black text-slate-900">
+              {activeDayTotals.calories || activeDayPlan.total_calories || 0} kcal
+            </span>
+          </div>
+
+          <div className="px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200">
+            <span className="text-[10px] uppercase font-bold text-emerald-800 block">Daily Target</span>
+            <span className="text-sm font-black text-emerald-950">
+              {activeDayPlan.calorie_target || rdaTargets.calories || 2000} kcal
+            </span>
+          </div>
+
+          <div className="px-3 py-1.5 rounded-xl bg-sky-50 border border-sky-200">
+            <span className="text-[10px] uppercase font-bold text-sky-800 block">Remaining Allowance</span>
+            <span className="text-sm font-black text-sky-950">
+              {Math.max(0, Math.round((activeDayPlan.calorie_target || rdaTargets.calories || 2000) - (activeDayTotals.calories || 0)))} kcal
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Deficiency-Targeted Food Recommendations for Active Day */}
+      {activeDayPlan.deficiency_recommendations && activeDayPlan.deficiency_recommendations.length > 0 && (
+        <div className="p-4 rounded-2xl bg-emerald-50/60 border border-emerald-200 space-y-2">
+          <span className="text-xs font-black text-emerald-900 uppercase tracking-wider block">
+            Targeted Foods for Predicted Nutrient Deficiencies:
+          </span>
+          <div className="flex flex-wrap gap-2">
+            {activeDayPlan.deficiency_recommendations.map((rec: any, rIdx: number) => (
+              <div 
+                key={rIdx}
+                className="px-3 py-1.5 rounded-xl bg-white border border-emerald-200 text-xs text-slate-800 font-semibold shadow-xs flex items-center gap-1.5"
+              >
+                <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-extrabold uppercase">
+                  {rec.nutrient}
+                </span>
+                <span>{rec.food}</span>
+                <span className="text-slate-400 text-[10px]">({rec.contribution})</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Main Day Content Grid */}
       <div className="grid lg:grid-cols-3 gap-8">
         {/* Left 2 Columns: Meal Slots (Breakfast, Lunch, Dinner, Snack) */}
@@ -430,7 +500,14 @@ export default function MealPlanPage({ userId }: MealPlanPageProps) {
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
                     <h3 className="text-sm font-extrabold text-slate-900 uppercase tracking-wider">{slotName}</h3>
                   </div>
-                  <span className="text-xs font-bold text-slate-500">Est. ₹{slotData.cost}</span>
+                  <div className="flex items-center gap-3">
+                    {slotData.nutrients?.calories && (
+                      <span className="text-xs font-extrabold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                        {slotData.nutrients.calories} kcal
+                      </span>
+                    )}
+                    <span className="text-xs font-bold text-slate-500">Est. ₹{slotData.cost}</span>
+                  </div>
                 </div>
 
                 <div className="space-y-2.5">
@@ -446,8 +523,14 @@ export default function MealPlanPage({ userId }: MealPlanPageProps) {
                       >
                         <div>
                           <span className="text-sm font-extrabold text-slate-900 block">{foodName}</span>
-                          <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500 font-medium">
+                          <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500 font-medium flex-wrap">
                             <span>Serving: {servingText}</span>
+                            {matchingObj?.calories && (
+                              <>
+                                <span>•</span>
+                                <span className="font-semibold text-emerald-700">{matchingObj.calories} kcal</span>
+                              </>
+                            )}
                             {itemCost && (
                               <>
                                 <span>•</span>

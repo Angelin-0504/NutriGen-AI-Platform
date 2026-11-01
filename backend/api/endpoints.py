@@ -16,23 +16,30 @@ except Exception:
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime
 
 from backend.database.db import get_db
-from backend.database.models import User, FamilyGroup, FamilyMember, FoodItem, FoodInteraction, Prediction, ProgressRecord
+from backend.database.models import User, FamilyGroup, FamilyMember, FoodItem, FoodInteraction, Prediction, ProgressRecord, WeeklyWeightRecord
 from backend.schemas.schemas import (
     UserAssessmentRequest, AssessmentResponse, NutrientRisk, FamilyGroupCreate, 
     FoodSwapRequest, ProgressUpdateRequest, ProgressResponse, TwinSimulationRequest,
-    DailyProgressCheckinRequest, SaveMealPlanRequest
+    DailyProgressCheckinRequest, SaveMealPlanRequest, UserRegisterRequest, UserLoginRequest,
+    AuthUserResponse, WeightLossDetails, WeeklyWeightCheckinRequest, WeightLossTwinSimulationRequest
 )
 from ml.explainability.shap_explain import NutriGenExplainer
 from recommendation.optimizer import generate_7day_meal_plan, optimize_daily_diet, structure_meals
 from recommendation.family_optimizer import optimize_family_menu
-from digital_twin.simulation import run_twin_simulation
+from digital_twin.simulation import run_twin_simulation, run_weight_loss_twin_simulation
 from backend.services.pdf_generator import NutriGenPDFGenerator
 from backend.services.doctor_report_parser import parse_doctor_report
+from backend.services.auth import (
+    hash_password, verify_password, validate_registration_input, 
+    create_access_token, decode_access_token
+)
+from backend.services.weight_loss import compute_weight_loss_plan, calculate_bmr, calculate_tdee
 
 router = APIRouter()
 
@@ -165,6 +172,209 @@ def get_foods(region: Optional[str] = None, category: Optional[str] = None, veg_
         query = query.filter(FoodItem.is_vegetarian == True)
     return query.all()
 
+# --- User Authentication Endpoints ---
+
+@router.post("/api/auth/register")
+def register_user(req: UserRegisterRequest, db: Session = Depends(get_db)):
+    is_valid, msg = validate_registration_input(req.name, req.email, req.password, req.confirm_password)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=msg)
+        
+    email_clean = (req.email or "").strip().lower()
+    name_clean = (req.name or "").strip()
+    
+    # Case-insensitive duplicate check
+    existing = db.query(User).filter(func.lower(func.trim(User.email)) == email_clean).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="An account with this email address already exists. Please log in or use a different email."
+        )
+        
+    user = User(
+        name=name_clean,
+        email=email_clean,
+        password_hash=hash_password(req.password)
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    token = create_access_token(user.id, user.email)
+    return {
+        "status": "success",
+        "message": "Account created successfully.",
+        "token": token,
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "has_profile": False,
+            "wants_weight_loss": False
+        }
+    }
+
+@router.post("/api/auth/login")
+def login_user(req: UserLoginRequest, db: Session = Depends(get_db)):
+    raw_ident = (req.email or req.username or "").strip()
+    if not raw_ident:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide your registered email or username."
+        )
+    if not req.password:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide your password."
+        )
+        
+    ident_lower = raw_ident.lower()
+    
+    # 1. Match by email (case-insensitive & trimmed)
+    user = db.query(User).filter(func.lower(func.trim(User.email)) == ident_lower).first()
+    
+    # 2. Match by full name / username (case-insensitive & trimmed)
+    if not user:
+        user = db.query(User).filter(func.lower(func.trim(User.name)) == ident_lower).first()
+        
+    # 3. Fallback: match by collapsing internal whitespace (e.g. "angelin sumithra" vs "angelinsumithra")
+    if not user:
+        ident_no_spaces = "".join(ident_lower.split())
+        candidates = db.query(User).filter(User.password_hash.isnot(None)).all()
+        for cand in candidates:
+            if cand.name and "".join(cand.name.lower().split()) == ident_no_spaces:
+                user = cand
+                break
+            if cand.email and "".join(cand.email.lower().split()) == ident_no_spaces:
+                user = cand
+                break
+    
+    if not user or not user.password_hash or not verify_password(req.password, user.password_hash):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password. Please verify your credentials and try again."
+        )
+        
+    token = create_access_token(user.id, user.email or "")
+    has_profile = bool(user.age and user.gender and user.height and user.weight)
+    
+    # Retrieve latest prediction if present
+    latest_pred = db.query(Prediction).filter(Prediction.user_id == user.id).order_by(Prediction.created_at.desc()).first()
+    latest_pred_dict = None
+    if latest_pred:
+        deficiences_out = []
+        total_risk = 0.0
+        risks = {
+            "iron_deficiency": latest_pred.iron_risk,
+            "vitamin_d_deficiency": latest_pred.vitamin_d_risk,
+            "vitamin_b12_deficiency": latest_pred.vitamin_b12_risk,
+            "calcium_deficiency": latest_pred.calcium_risk,
+            "magnesium_deficiency": latest_pred.magnesium_risk,
+            "zinc_deficiency": latest_pred.zinc_risk
+        }
+        for k, p in risks.items():
+            cat, conf = calculate_risk_category(p)
+            total_risk += p
+            deficiences_out.append({
+                "nutrient": k.replace("_deficiency", "").replace("_", " ").title(),
+                "probability": round(p, 2),
+                "risk_category": cat,
+                "confidence": conf,
+                "guidance": get_guidance(k, cat)
+            })
+        prevention_score = round(max(0.0, 100.0 - (total_risk / 6.0) * 100.0), 1)
+        explanations = json.loads(latest_pred.explanation_json) if latest_pred.explanation_json else {}
+        
+        wl_details = None
+        if user.wants_weight_loss and user.calorie_target:
+            wt_lose = max(0.0, round((user.weight or 0.0) - (user.target_weight or user.weight or 0.0), 1))
+            rate = user.weight_loss_rate or 0.5
+            est_wks = round(wt_lose / rate, 1) if rate > 0 and wt_lose > 0 else 0.0
+            wl_details = {
+                "wants_weight_loss": True,
+                "current_weight": user.weight,
+                "target_weight": user.target_weight,
+                "weight_to_lose": wt_lose,
+                "weight_loss_rate": rate,
+                "bmr": user.bmr,
+                "tdee": user.tdee,
+                "calorie_deficit": user.calorie_deficit,
+                "calorie_target": user.calorie_target,
+                "estimated_weeks": est_wks,
+                "safety_note": "Nutrient-safe calorie deficit.",
+                "clinical_notice": "Estimates based on Mifflin-St Jeor equation."
+            }
+            
+        latest_pred_dict = {
+            "user_id": user.id,
+            "bmi": user.bmi,
+            "deficiences": deficiences_out,
+            "explanations": explanations,
+            "prevention_score": prevention_score,
+            "weight_loss": wl_details
+        }
+        
+    saved_plan = None
+    if user.saved_meal_plan:
+        try:
+            saved_plan = json.loads(user.saved_meal_plan)
+        except Exception:
+            saved_plan = None
+            
+    return {
+        "status": "success",
+        "token": token,
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "has_profile": has_profile,
+            "wants_weight_loss": bool(user.wants_weight_loss),
+            "target_weight": user.target_weight,
+            "weight_loss_rate": user.weight_loss_rate,
+            "bmr": user.bmr,
+            "tdee": user.tdee,
+            "calorie_target": user.calorie_target,
+            "calorie_deficit": user.calorie_deficit,
+            "profile": {
+                "name": user.name,
+                "age": user.age,
+                "gender": user.gender,
+                "height": user.height,
+                "weight": user.weight,
+                "bmi": user.bmi,
+                "region": user.region,
+                "diet_type": user.diet_type,
+                "daily_food_budget": user.daily_food_budget,
+                "activity_level": user.activity_level,
+                "sun_exposure": user.sun_exposure,
+                "sleep_hours": user.sleep_hours,
+                "medical_conditions": json.loads(user.medical_conditions) if user.medical_conditions else [],
+                "symptoms": json.loads(user.symptoms) if user.symptoms else [],
+                "allergies": json.loads(user.allergies) if user.allergies else [],
+                "liked_foods": json.loads(user.liked_foods) if user.liked_foods else [],
+                "disliked_foods": json.loads(user.disliked_foods) if user.disliked_foods else []
+            } if has_profile else None,
+            "latest_prediction": latest_pred_dict,
+            "saved_meal_plan": saved_plan
+        }
+    }
+
+@router.post("/api/auth/logout")
+def logout_user():
+    return {"status": "success", "message": "Successfully logged out."}
+
+@router.get("/api/auth/me")
+def get_current_user_profile(user_id: Optional[int] = None, token: Optional[str] = None, db: Session = Depends(get_db)):
+    target_id = user_id
+    if token and not target_id:
+        payload = decode_access_token(token)
+        if payload:
+            target_id = payload.get("uid")
+    if not target_id:
+        raise HTTPException(status_code=401, detail="Authentication required or invalid session token.")
+    return get_user_profile(target_id, db)
+
 @router.get("/api/user/{user_id}")
 def get_user_profile(user_id: int, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
@@ -173,6 +383,7 @@ def get_user_profile(user_id: int, db: Session = Depends(get_db)):
     return {
         "id": user.id,
         "name": user.name,
+        "email": user.email,
         "age": user.age,
         "gender": user.gender,
         "height": user.height,
@@ -184,6 +395,13 @@ def get_user_profile(user_id: int, db: Session = Depends(get_db)):
         "activity_level": user.activity_level,
         "sun_exposure": user.sun_exposure,
         "sleep_hours": user.sleep_hours,
+        "wants_weight_loss": bool(user.wants_weight_loss),
+        "target_weight": user.target_weight,
+        "weight_loss_rate": user.weight_loss_rate,
+        "bmr": user.bmr,
+        "tdee": user.tdee,
+        "calorie_target": user.calorie_target,
+        "calorie_deficit": user.calorie_deficit,
         "symptoms": json.loads(user.symptoms) if user.symptoms else [],
         "allergies": json.loads(user.allergies) if user.allergies else [],
         "liked_foods": json.loads(user.liked_foods) if user.liked_foods else [],
@@ -319,16 +537,84 @@ def create_assessment(req: UserAssessmentRequest, db: Session = Depends(get_db))
     features_dict = pred_res["features"]
     bmi = pred_res["bmi"]
 
-    # 2. Save User to DB
-    user = User(
-        name=req.name, age=req.age, gender=req.gender, height=req.height, weight=req.weight,
-        bmi=bmi, region=req.region, diet_type=req.diet_type, daily_food_budget=req.daily_food_budget,
-        activity_level=req.activity_level, sun_exposure=req.sun_exposure, sleep_hours=req.sleep_hours,
-        medical_conditions=json.dumps(req.medical_conditions), symptoms=json.dumps(req.symptoms),
-        allergies=json.dumps(req.allergies), liked_foods=json.dumps(req.liked_foods),
-        disliked_foods=json.dumps(req.disliked_foods)
-    )
-    db.add(user)
+    # 2. Save or Update User in DB
+    user = None
+    if req.user_id:
+        user = db.query(User).filter(User.id == req.user_id).first()
+
+    if user:
+        user.name = req.name
+        user.age = req.age
+        user.gender = req.gender
+        user.height = req.height
+        user.weight = req.weight
+        user.bmi = bmi
+        user.region = req.region
+        user.diet_type = req.diet_type
+        user.daily_food_budget = req.daily_food_budget
+        user.activity_level = req.activity_level
+        user.sun_exposure = req.sun_exposure
+        user.sleep_hours = req.sleep_hours
+        user.medical_conditions = json.dumps(req.medical_conditions)
+        user.symptoms = json.dumps(req.symptoms)
+        user.allergies = json.dumps(req.allergies)
+        user.liked_foods = json.dumps(req.liked_foods)
+        user.disliked_foods = json.dumps(req.disliked_foods)
+    else:
+        user = User(
+            name=req.name, age=req.age, gender=req.gender, height=req.height, weight=req.weight,
+            bmi=bmi, region=req.region, diet_type=req.diet_type, daily_food_budget=req.daily_food_budget,
+            activity_level=req.activity_level, sun_exposure=req.sun_exposure, sleep_hours=req.sleep_hours,
+            medical_conditions=json.dumps(req.medical_conditions), symptoms=json.dumps(req.symptoms),
+            allergies=json.dumps(req.allergies), liked_foods=json.dumps(req.liked_foods),
+            disliked_foods=json.dumps(req.disliked_foods)
+        )
+        db.add(user)
+
+    # 2b. Weight Loss and Calorie Intake Calculation (if requested)
+    wl_details = None
+    if req.wants_weight_loss:
+        target_wt = req.target_weight if (req.target_weight and req.target_weight > 0) else max(30.0, req.weight - 5.0)
+        rate = req.weight_loss_rate or 0.5
+        wl_calc = compute_weight_loss_plan(
+            current_weight_kg=req.weight,
+            target_weight_kg=target_wt,
+            height_cm=req.height,
+            age_years=req.age,
+            gender=req.gender,
+            activity_level=req.activity_level,
+            rate_kg_per_week=rate
+        )
+        user.wants_weight_loss = True
+        user.target_weight = target_wt
+        user.weight_loss_rate = rate
+        user.bmr = wl_calc["bmr"]
+        user.tdee = wl_calc["tdee"]
+        user.calorie_target = wl_calc["calorie_target"]
+        user.calorie_deficit = wl_calc["calorie_deficit"]
+        wl_details = WeightLossDetails(
+            wants_weight_loss=True,
+            current_weight=req.weight,
+            target_weight=target_wt,
+            weight_to_lose=wl_calc["weight_to_lose"],
+            weight_loss_rate=rate,
+            bmr=wl_calc["bmr"],
+            tdee=wl_calc["tdee"],
+            calorie_deficit=wl_calc["calorie_deficit"],
+            calorie_target=wl_calc["calorie_target"],
+            estimated_weeks=wl_calc["estimated_weeks"],
+            safety_note=wl_calc["safety_note"],
+            clinical_notice=wl_calc["clinical_notice"]
+        )
+    else:
+        user.wants_weight_loss = False
+        user.target_weight = None
+        user.weight_loss_rate = None
+        user.bmr = None
+        user.tdee = None
+        user.calorie_target = None
+        user.calorie_deficit = None
+
     db.commit()
     db.refresh(user)
 
@@ -386,7 +672,8 @@ def create_assessment(req: UserAssessmentRequest, db: Session = Depends(get_db))
         bmi=round(bmi, 2),
         deficiences=deficiences_out,
         explanations=shap_explanations,
-        prevention_score=prevention_score
+        prevention_score=prevention_score,
+        weight_loss=wl_details
     )
 
 @router.post("/api/meal-plan")
@@ -423,7 +710,9 @@ def get_meal_plan(user_id: int, regenerate: bool = False, db: Session = Depends(
         "allergies": json.loads(user.allergies) if user.allergies else [],
         "disliked_foods": json.loads(user.disliked_foods) if user.disliked_foods else [],
         "liked_foods": json.loads(user.liked_foods) if user.liked_foods else [],
-        "daily_budget": user.daily_food_budget
+        "daily_budget": user.daily_food_budget,
+        "wants_weight_loss": bool(user.wants_weight_loss),
+        "calorie_target": user.calorie_target
     }
     
     # Check recent progress records to adapt recommendations dynamically
@@ -521,14 +810,31 @@ def get_family_optimized_menu(family_group: FamilyGroupCreate, db: Session = Dep
 def get_twin_simulation(req: TwinSimulationRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == req.user_id).first()
     latest_pred = db.query(Prediction).filter(Prediction.user_id == req.user_id).order_by(Prediction.created_at.desc()).first()
+    
+    # If no prediction found for this exact user_id, fallback to the latest prediction in DB
     if not latest_pred:
+        latest_pred = db.query(Prediction).order_by(Prediction.created_at.desc()).first()
+        if latest_pred and not user:
+            user = db.query(User).filter(User.id == latest_pred.user_id).first()
+
+    if not latest_pred:
+        # Derive personalized baseline risks from user profile if available, else varied realistic defaults
+        symptom_list = json.loads(user.symptoms) if (user and user.symptoms) else []
+        diet_str = user.diet_type if user else "Vegetarian"
+        sun_str = user.sun_exposure if user else "Medium"
+        
+        has_fatigue = any(s in symptom_list for s in ["fatigue", "pale_skin", "weak_nails"])
+        has_cramps = any(s in symptom_list for s in ["muscle_cramps", "bone_pain", "muscle_weakness"])
+        is_veg = diet_str in ["Vegetarian", "Vegan"]
+        is_vegan = diet_str == "Vegan"
+        
         risks = {
-            "iron_deficiency": 0.50,
-            "vitamin_d_deficiency": 0.50,
-            "vitamin_b12_deficiency": 0.50,
-            "calcium_deficiency": 0.50,
-            "magnesium_deficiency": 0.50,
-            "zinc_deficiency": 0.50
+            "iron_deficiency": 0.76 if (has_fatigue or is_veg) else 0.38,
+            "vitamin_d_deficiency": 0.82 if sun_str == "Low" else (0.45 if sun_str == "High" else 0.65),
+            "vitamin_b12_deficiency": 0.85 if is_vegan else (0.62 if is_veg else 0.28),
+            "calcium_deficiency": 0.72 if (has_cramps or is_vegan) else 0.44,
+            "magnesium_deficiency": 0.68 if has_cramps else 0.35,
+            "zinc_deficiency": 0.60 if is_vegan else 0.32
         }
     else:
         risks = {
@@ -579,6 +885,38 @@ def get_twin_simulation(req: TwinSimulationRequest, db: Session = Depends(get_db
         
     return sim_res
 
+def estimate_food_calories(food_name: str, db: Session = None) -> float:
+    """Estimates calories for a food item using DB lookup, keyword heuristics, or standard baseline."""
+    if not food_name:
+        return 220.0
+    name_clean = food_name.strip().lower()
+    
+    if db:
+        match = db.query(FoodItem).filter(FoodItem.name.ilike(f"%{name_clean}%")).first()
+        if match and match.calories:
+            return float(match.calories)
+            
+    # Nutritional heuristics based on common Indian & international dish categories
+    if any(k in name_clean for k in ["salad", "soup", "sprouts", "cucumber", "spinach", "palak", "green tea"]):
+        return 110.0
+    elif any(k in name_clean for k in ["fruit", "apple", "papaya", "banana", "smoothie", "orange", "berries"]):
+        return 130.0
+    elif any(k in name_clean for k in ["buttermilk", "curd", "yogurt", "milk"]):
+        return 95.0
+    elif any(k in name_clean for k in ["egg", "boiled egg", "omelette"]):
+        return 145.0
+    elif any(k in name_clean for k in ["idli", "dosa", "roti", "chapati", "phulka", "dal", "sambar", "chana"]):
+        return 210.0
+    elif any(k in name_clean for k in ["rice", "brown rice", "khichdi", "pongal", "oats"]):
+        return 250.0
+    elif any(k in name_clean for k in ["paneer", "tofu", "soya chunks"]):
+        return 240.0
+    elif any(k in name_clean for k in ["chicken", "fish", "meat", "seafood"]):
+        return 280.0
+    elif any(k in name_clean for k in ["biryani", "fried", "burger", "pizza", "sweet", "ladoo", "halwa", "dessert"]):
+        return 420.0
+    return 220.0
+
 @router.post("/api/progress/checkin")
 def save_daily_progress_checkin(req: DailyProgressCheckinRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == req.user_id).first()
@@ -601,49 +939,109 @@ def save_daily_progress_checkin(req: DailyProgressCheckinRequest, db: Session = 
     skipped_cnt = 0
     pending_cnt = 0
     
-    # Standard slots count
+    total_planned_calories = 0.0
+    total_actual_calories = 0.0
+    
+    nutrients = ["calories", "protein", "iron", "calcium", "vitamin_d", "vitamin_b12", "magnesium", "zinc"]
+    estimated_nutrients = {n: 0.0 for n in nutrients}
+    
     standard_slots = ["Breakfast", "Mid-Morning Snack", "Lunch", "Evening Snack", "Dinner"]
     for slot in standard_slots:
         item = meal_checkins.get(slot)
-        if not item or item.get("status") == "unreported":
+        if not item or item.get("status") in ["unreported", "pending", None]:
             pending_cnt += 1
-        elif item.get("status") == "eaten_as_planned":
-            completed_cnt += 1
-        elif item.get("status") == "eaten_with_modifications":
-            modified_cnt += 1
-        elif item.get("status") == "replaced":
-            replaced_cnt += 1
-        elif item.get("status") == "skipped":
-            skipped_cnt += 1
+            if item is None:
+                item = {"status": "unreported"}
+                meal_checkins[slot] = item
+            else:
+                item["status"] = "unreported"
+            item["actual_calories"] = None
+            continue
             
-    total_reported = completed_cnt + modified_cnt + replaced_cnt + skipped_cnt
-    
+        st = item.get("status")
+        planned_food = item.get("planned_food", "")
+        actual_food = item.get("actual_food", "")
+        portion_pct = float(item.get("portion_pct") or 100.0)
+        
+        # Planned calories for this meal slot
+        p_cals = float(item.get("planned_calories") or 0.0)
+        if p_cals <= 0 and planned_food:
+            p_cals = estimate_food_calories(planned_food, db)
+        item["planned_calories"] = round(p_cals, 1)
+        total_planned_calories += p_cals
+        
+        # Handle Actual Calorie Prediction based on Status:
+        # Eaten as Planned: 100% planned calories
+        # Modified: planned calories * (portion% / 100)
+        # Replaced: replaced food calories * (portion% / 100)
+        # Skipped: 0 calories
+        # Pending/Unreported: uncounted (None)
+        if st == "eaten_as_planned":
+            completed_cnt += 1
+            item["actual_calories"] = round(p_cals, 1)
+            total_actual_calories += p_cals
+            # Accumulate micronutrients from planned food
+            f_item = db.query(FoodItem).filter(FoodItem.name == planned_food).first() if planned_food else None
+            if f_item:
+                for n in nutrients:
+                    estimated_nutrients[n] += getattr(f_item, n, 0.0)
+                    
+        elif st in ["eaten_with_modifications", "modified"]:
+            modified_cnt += 1
+            mod_cals = p_cals * (portion_pct / 100.0)
+            item["actual_calories"] = round(mod_cals, 1)
+            total_actual_calories += mod_cals
+            f_item = db.query(FoodItem).filter(FoodItem.name == planned_food).first() if planned_food else None
+            if f_item:
+                for n in nutrients:
+                    estimated_nutrients[n] += getattr(f_item, n, 0.0) * (portion_pct / 100.0)
+                    
+        elif st == "replaced":
+            replaced_cnt += 1
+            rep_food_str = actual_food if actual_food else planned_food
+            base_cals = estimate_food_calories(rep_food_str, db)
+            rep_cals = base_cals * (portion_pct / 100.0)
+            item["actual_calories"] = round(rep_cals, 1)
+            total_actual_calories += rep_cals
+            f_item = db.query(FoodItem).filter(FoodItem.name == rep_food_str).first()
+            if f_item:
+                for n in nutrients:
+                    estimated_nutrients[n] += getattr(f_item, n, 0.0) * (portion_pct / 100.0)
+            else:
+                estimated_nutrients["protein"] += 6.0 * (portion_pct / 100.0)
+                
+        elif st == "skipped":
+            skipped_cnt += 1
+            item["actual_calories"] = 0.0
+            
+        else:
+            pending_cnt += 1
+            item["status"] = "unreported"
+            item["actual_calories"] = None
+            
     # Strictly calculated adherence score:
     # Eaten as planned = 100%, Modified = 75%, Replaced = 50%, Skipped = 0%
     # Pending/unreported meals are NOT counted as completed!
+    total_reported = completed_cnt + modified_cnt + replaced_cnt + skipped_cnt
     if total_reported > 0:
         total_score = (completed_cnt * 100.0) + (modified_cnt * 75.0) + (replaced_cnt * 50.0)
         daily_adherence_pct = round(total_score / (len(standard_slots) * 100.0) * 100.0, 1)
     else:
         daily_adherence_pct = 0.0
-
-    # Estimate actual nutrients consumed
-    nutrients = ["calories", "protein", "iron", "calcium", "vitamin_d", "vitamin_b12", "magnesium", "zinc"]
-    estimated_nutrients = {n: 0.0 for n in nutrients}
-    
-    for slot, item in meal_checkins.items():
-        st = item.get("status")
-        portion_pct = item.get("portion_pct", 100.0) / 100.0
         
-        target_food_name = item.get("actual_food") if st == "replaced" else item.get("planned_food")
-        if target_food_name and st in ["eaten_as_planned", "eaten_with_modifications", "replaced"]:
-            f_item = db.query(FoodItem).filter(FoodItem.name == target_food_name).first()
-            if f_item:
-                for n in nutrients:
-                    estimated_nutrients[n] += getattr(f_item, n) * portion_pct
+    cal_target = float(user.calorie_target or (2200.0 if (user.gender or "").lower() == "male" else 2000.0))
+    calorie_diff = round(total_actual_calories - cal_target, 1)
+    remaining_allowance = max(0.0, round(cal_target - total_actual_calories, 1))
 
     for n in nutrients:
         estimated_nutrients[n] = round(estimated_nutrients[n], 2)
+        
+    estimated_nutrients["calories"] = round(total_actual_calories, 1)
+    estimated_nutrients["planned_calories"] = round(total_planned_calories, 1)
+    estimated_nutrients["calorie_target"] = round(cal_target, 1)
+    estimated_nutrients["calorie_difference"] = round(calorie_diff, 1)
+    estimated_nutrients["remaining_calorie_allowance"] = round(remaining_allowance, 1)
+    estimated_nutrients["pending_meals_count"] = pending_cnt
 
     baseline_pred = db.query(Prediction).filter(Prediction.user_id == req.user_id).order_by(Prediction.created_at.asc()).first()
     
@@ -711,7 +1109,13 @@ def save_daily_progress_checkin(req: DailyProgressCheckinRequest, db: Session = 
         "replaced_count": replaced_cnt,
         "skipped_count": skipped_cnt,
         "pending_count": pending_cnt,
-        "estimated_nutrients": estimated_nutrients
+        "total_actual_calories": round(total_actual_calories, 1),
+        "total_planned_calories": round(total_planned_calories, 1),
+        "calorie_target": round(cal_target, 1),
+        "calorie_difference": round(calorie_diff, 1),
+        "remaining_calorie_allowance": round(remaining_allowance, 1),
+        "estimated_nutrients": estimated_nutrients,
+        "meal_checkins": meal_checkins
     }
 
 @router.get("/api/progress/{user_id}")
@@ -753,6 +1157,11 @@ def get_user_progress_history(user_id: int, db: Session = Depends(get_db)):
             "pending_count": r.pending_count,
             "meal_checkins": r_checkins,
             "estimated_nutrients": r_nutrients,
+            "total_actual_calories": r_nutrients.get("calories", 0.0),
+            "total_planned_calories": r_nutrients.get("planned_calories", 0.0),
+            "calorie_target": r_nutrients.get("calorie_target", user.calorie_target),
+            "calorie_difference": r_nutrients.get("calorie_difference", 0.0),
+            "remaining_calorie_allowance": r_nutrients.get("remaining_calorie_allowance", 0.0),
             "lab_measurements": r_labs,
             "symptoms": r_syms,
             "notes": r.notes
@@ -777,6 +1186,8 @@ def get_user_progress_history(user_id: int, db: Session = Depends(get_db)):
                 adaptation_notes.append(f"Taste adaptation: Offering alternatives matching reported preference for {c_data.get('actual_food', 'replacement meal')}.")
 
     avg_weekly_adherence = round(sum_adherence / max(len(records), 1), 1) if records else 0.0
+    actual_cals_list = [json.loads(r.actual_nutrients).get("calories", 0.0) for r in records if r.actual_nutrients and json.loads(r.actual_nutrients).get("calories", 0.0) > 0]
+    avg_actual_cals = round(float(np.mean(actual_cals_list)), 1) if actual_cals_list else 0.0
 
     return {
         "user_id": user_id,
@@ -788,12 +1199,285 @@ def get_user_progress_history(user_id: int, db: Session = Depends(get_db)):
             "total_replaced": total_replaced,
             "total_skipped": total_skipped,
             "total_pending": total_pending,
-            "average_adherence_pct": avg_weekly_adherence
+            "average_adherence_pct": avg_weekly_adherence,
+            "average_daily_actual_calories": avg_actual_cals,
+            "daily_calorie_target": user.calorie_target,
+            "wants_weight_loss": bool(user.wants_weight_loss)
         },
         "lab_history": lab_history,
         "symptom_history": symptom_history,
         "adaptation_notes": list(set(adaptation_notes))
     }
+
+# =====================================================================
+# WEEKLY WEIGHT PROGRESS & WEIGHT-LOSS DIGITAL TWIN ENDPOINTS
+# =====================================================================
+
+@router.post("/api/progress/weekly-weight")
+def save_weekly_weight_progress(req: WeeklyWeightCheckinRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    record_date_str = req.record_date or datetime.utcnow().strftime("%Y-%m-%d")
+    
+    # Establish baseline initial weight (Week 0)
+    w0_rec = db.query(WeeklyWeightRecord).filter(
+        WeeklyWeightRecord.user_id == req.user_id,
+        WeeklyWeightRecord.week_number == 0
+    ).first()
+    
+    initial_w = user.weight or 75.0
+    if not w0_rec:
+        w0_rec = WeeklyWeightRecord(
+            user_id=req.user_id,
+            week_number=0,
+            record_date=user.created_at.strftime("%Y-%m-%d") if user.created_at else record_date_str,
+            weight=initial_w,
+            status="recorded",
+            initial_weight=initial_w,
+            previous_weight=initial_w,
+            target_weight=user.target_weight,
+            weight_change_from_initial=0.0,
+            weight_change_from_previous=0.0,
+            notes="Initial baseline weight"
+        )
+        db.add(w0_rec)
+        db.commit()
+    else:
+        initial_w = w0_rec.weight or initial_w
+        
+    # Check if record for this week exists
+    existing = db.query(WeeklyWeightRecord).filter(
+        WeeklyWeightRecord.user_id == req.user_id,
+        WeeklyWeightRecord.week_number == req.week_number
+    ).first()
+    
+    # If no weight entered, mark as Pending
+    if req.weight is None or req.weight <= 0:
+        if existing:
+            existing.status = "pending"
+            existing.weight = None
+            existing.notes = req.notes or "Pending check-in"
+        else:
+            new_rec = WeeklyWeightRecord(
+                user_id=req.user_id,
+                week_number=req.week_number,
+                record_date=record_date_str,
+                weight=None,
+                status="pending",
+                initial_weight=initial_w,
+                target_weight=user.target_weight,
+                notes=req.notes or "Pending check-in"
+            )
+            db.add(new_rec)
+        db.commit()
+        return {
+            "status": "pending",
+            "message": f"Week {req.week_number} weight progress is marked as Pending.",
+            "week_number": req.week_number,
+            "record_date": record_date_str,
+            "initial_weight": initial_w,
+            "target_weight": user.target_weight
+        }
+        
+    # Weight entered: calculate comparisons
+    prev_rec = db.query(WeeklyWeightRecord).filter(
+        WeeklyWeightRecord.user_id == req.user_id,
+        WeeklyWeightRecord.status == "recorded",
+        WeeklyWeightRecord.week_number < req.week_number
+    ).order_by(WeeklyWeightRecord.week_number.desc()).first()
+    
+    prev_w = prev_rec.weight if (prev_rec and prev_rec.weight) else initial_w
+    diff_init = round(req.weight - initial_w, 2)
+    diff_prev = round(req.weight - prev_w, 2)
+    
+    if existing:
+        existing.weight = req.weight
+        existing.status = "recorded"
+        existing.record_date = record_date_str
+        existing.initial_weight = initial_w
+        existing.previous_weight = prev_w
+        existing.target_weight = user.target_weight
+        existing.weight_change_from_initial = diff_init
+        existing.weight_change_from_previous = diff_prev
+        existing.notes = req.notes or ""
+    else:
+        new_rec = WeeklyWeightRecord(
+            user_id=req.user_id,
+            week_number=req.week_number,
+            record_date=record_date_str,
+            weight=req.weight,
+            status="recorded",
+            initial_weight=initial_w,
+            previous_weight=prev_w,
+            target_weight=user.target_weight,
+            weight_change_from_initial=diff_init,
+            weight_change_from_previous=diff_prev,
+            notes=req.notes or ""
+        )
+        db.add(new_rec)
+        
+    # Update user current weight and BMI
+    user.weight = req.weight
+    if user.height:
+        h_m = user.height / 100.0
+        user.bmi = round(req.weight / (h_m ** 2), 2)
+        
+    db.commit()
+    
+    # Auto-update Weight-Loss Digital Twin simulation with new weekly weight
+    history_recs = db.query(WeeklyWeightRecord).filter(
+        WeeklyWeightRecord.user_id == req.user_id,
+        WeeklyWeightRecord.status == "recorded"
+    ).order_by(WeeklyWeightRecord.week_number.asc()).all()
+    
+    history_list = [{"week": r.week_number, "weight": r.weight} for r in history_recs]
+    
+    sim_res = run_weight_loss_twin_simulation(
+        initial_weight=initial_w,
+        current_weight=req.weight,
+        target_weight=user.target_weight or (initial_w - 5.0),
+        height=user.height or 165.0,
+        age=user.age or 30,
+        gender=user.gender or "Female",
+        activity_level=user.activity_level or "Lightly Active",
+        bmr=user.bmr,
+        tdee=user.tdee,
+        calorie_target=user.calorie_target,
+        weekly_weight_history=history_list
+    )
+    user.saved_weight_loss_simulation = json.dumps(sim_res)
+    db.commit()
+    
+    return {
+        "status": "recorded",
+        "message": f"Week {req.week_number} weight of {req.weight} kg recorded successfully.",
+        "week_number": req.week_number,
+        "record_date": record_date_str,
+        "weight": req.weight,
+        "initial_weight": initial_w,
+        "previous_weight": prev_w,
+        "target_weight": user.target_weight,
+        "weight_change_from_initial": diff_init,
+        "weight_change_from_previous": diff_prev,
+        "current_bmi": user.bmi,
+        "simulation": sim_res
+    }
+
+@router.get("/api/progress/weekly-weight/{user_id}")
+def get_weekly_weight_history(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    records = db.query(WeeklyWeightRecord).filter(
+        WeeklyWeightRecord.user_id == user_id
+    ).order_by(WeeklyWeightRecord.week_number.asc()).all()
+    
+    w0 = user.weight or 75.0
+    for r in records:
+        if r.week_number == 0 and r.weight:
+            w0 = r.weight
+            break
+            
+    recs_out = []
+    has_pending = False
+    for r in records:
+        if r.status == "pending":
+            has_pending = True
+        recs_out.append({
+            "id": r.id,
+            "week_number": r.week_number,
+            "record_date": r.record_date,
+            "weight": r.weight,
+            "status": r.status,
+            "initial_weight": r.initial_weight or w0,
+            "previous_weight": r.previous_weight,
+            "target_weight": r.target_weight or user.target_weight,
+            "weight_change_from_initial": r.weight_change_from_initial,
+            "weight_change_from_previous": r.weight_change_from_previous,
+            "notes": r.notes
+        })
+        
+    last_week_num = max([r.week_number for r in records], default=0)
+    
+    return {
+        "user_id": user_id,
+        "current_weight": user.weight,
+        "initial_weight": w0,
+        "target_weight": user.target_weight,
+        "total_weight_change": round((user.weight - w0), 2) if user.weight else 0.0,
+        "has_pending_checkin": has_pending,
+        "next_week_number": last_week_num + 1,
+        "records": recs_out
+    }
+
+@router.post("/api/digital-twin/weight-loss/simulate")
+def get_weight_loss_twin_simulation_endpoint(req: WeightLossTwinSimulationRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == req.user_id).first()
+    if not user:
+        user = db.query(User).order_by(User.created_at.desc()).first()
+        
+    if not user:
+        raise HTTPException(status_code=404, detail="User profile not found")
+        
+    # Weekly weight history
+    weekly_recs = db.query(WeeklyWeightRecord).filter(
+        WeeklyWeightRecord.user_id == user.id,
+        WeeklyWeightRecord.status == "recorded"
+    ).order_by(WeeklyWeightRecord.week_number.asc()).all()
+    
+    weekly_history = [{"week": r.week_number, "weight": r.weight} for r in weekly_recs]
+    
+    # Calculate average actual daily calories and adherence from recent progress records
+    prog_recs = db.query(ProgressRecord).filter(ProgressRecord.user_id == user.id).all()
+    actual_cals_list = []
+    adherences = []
+    for pr in prog_recs:
+        if pr.adherence_pct is not None:
+            adherences.append(pr.adherence_pct)
+        if pr.actual_nutrients:
+            try:
+                nut_data = json.loads(pr.actual_nutrients)
+                if nut_data.get("calories") and nut_data["calories"] > 0:
+                    actual_cals_list.append(nut_data["calories"])
+            except Exception:
+                pass
+                
+    avg_actual_cals = float(np.mean(actual_cals_list)) if actual_cals_list else None
+    avg_adh = float(np.mean(adherences)) if adherences else (req.adherence_score or 85.0)
+    adh_to_use = req.adherence_score if req.adherence_score is not None else avg_adh
+    
+    w_curr = user.weight or 75.0
+    w_target = req.target_weight or user.target_weight or (w_curr - 5.0)
+    c_target = req.calorie_target or user.calorie_target
+    
+    w_init = w_curr
+    if weekly_history and weekly_history[0]["week"] == 0:
+        w_init = weekly_history[0]["weight"]
+        
+    sim_res = run_weight_loss_twin_simulation(
+        initial_weight=w_init,
+        current_weight=w_curr,
+        target_weight=w_target,
+        height=user.height or 165.0,
+        age=user.age or 30,
+        gender=user.gender or "Female",
+        activity_level=user.activity_level or "Lightly Active",
+        bmr=user.bmr,
+        tdee=user.tdee,
+        calorie_target=c_target,
+        adherence_score=adh_to_use,
+        actual_daily_calories=avg_actual_cals,
+        duration_weeks=req.duration_weeks,
+        weekly_weight_history=weekly_history
+    )
+    
+    user.saved_weight_loss_simulation = json.dumps(sim_res)
+    db.commit()
+    
+    return sim_res
 
 @router.post("/api/progress", response_model=ProgressResponse)
 def save_and_evaluate_progress(req: ProgressUpdateRequest, db: Session = Depends(get_db)):
@@ -859,7 +1543,14 @@ def download_pdf_report(user_id: int, db: Session = Depends(get_db)):
         
     user_data = {
         "name": user.name, "age": user.age, "gender": user.gender, "height": user.height, "weight": user.weight,
-        "region": user.region, "diet_type": user.diet_type, "daily_food_budget": user.daily_food_budget
+        "region": user.region, "diet_type": user.diet_type, "daily_food_budget": user.daily_food_budget,
+        "wants_weight_loss": bool(user.wants_weight_loss),
+        "target_weight": user.target_weight,
+        "weight_loss_rate": user.weight_loss_rate,
+        "bmr": user.bmr,
+        "tdee": user.tdee,
+        "calorie_target": user.calorie_target,
+        "calorie_deficit": user.calorie_deficit
     }
     
     defic_keys = {

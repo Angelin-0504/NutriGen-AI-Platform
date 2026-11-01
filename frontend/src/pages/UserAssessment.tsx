@@ -26,6 +26,7 @@ import {
 interface UserAssessmentProps {
   onSubmit: (data: any) => Promise<void>;
   loading: boolean;
+  currentUser?: any;
 }
 
 const QUESTIONS = [
@@ -65,13 +66,18 @@ const COMMON_ALLERGIES = [
   'Peanuts', 'Tree Nuts', 'Lactose', 'Gluten', 'Soy', 'Egg', 'Fish', 'Shellfish', 'Sesame'
 ];
 
-export default function UserAssessment({ onSubmit, loading }: UserAssessmentProps) {
+export default function UserAssessment({ onSubmit, loading, currentUser }: UserAssessmentProps) {
   const [currentQIndex, setCurrentQIndex] = useState(0);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [agentStarted, setAgentStarted] = useState(false);
   const [editingField, setEditingField] = useState<string | null>(null);
+
+  // Weight-Loss & Calorie Management State
+  const [wantsWeightLoss, setWantsWeightLoss] = useState<boolean | null>(null);
+  const [targetWeight, setTargetWeight] = useState<number | ''>('');
+  const [weightLossRate, setWeightLossRate] = useState<number>(0.5);
 
   // Manual symptom and allergy edit state
   const [manualSymptomInput, setManualSymptomInput] = useState('');
@@ -149,6 +155,71 @@ export default function UserAssessment({ onSubmit, loading }: UserAssessmentProp
 
   const validationErrors = getValidationErrors();
   const isProfileComplete = validationErrors.length === 0;
+
+  // Prefill authenticated user profile and saved personal information
+  useEffect(() => {
+    if (currentUser?.profile) {
+      const p = currentUser.profile;
+      setFormData(prev => ({
+        ...prev,
+        name: p.name || currentUser.name || prev.name,
+        age: p.age !== undefined && p.age !== null ? p.age : prev.age,
+        gender: p.gender || prev.gender,
+        height: p.height !== undefined && p.height !== null ? p.height : prev.height,
+        weight: p.weight !== undefined && p.weight !== null ? p.weight : prev.weight,
+        region: p.region || prev.region,
+        diet_type: p.diet_type || prev.diet_type,
+        daily_food_budget: p.daily_food_budget !== undefined && p.daily_food_budget !== null ? p.daily_food_budget : prev.daily_food_budget,
+        activity_level: p.activity_level || prev.activity_level,
+        sun_exposure: p.sun_exposure || prev.sun_exposure,
+        sleep_hours: p.sleep_hours !== undefined && p.sleep_hours !== null ? p.sleep_hours : prev.sleep_hours,
+        medical_conditions: Array.isArray(p.medical_conditions) ? p.medical_conditions : prev.medical_conditions,
+        symptoms: Array.isArray(p.symptoms) ? p.symptoms : prev.symptoms,
+        allergies: Array.isArray(p.allergies) ? p.allergies : prev.allergies,
+        liked_foods: Array.isArray(p.liked_foods) ? p.liked_foods : prev.liked_foods,
+        disliked_foods: Array.isArray(p.disliked_foods) ? p.disliked_foods : prev.disliked_foods,
+      }));
+      if (currentUser.wants_weight_loss !== undefined && wantsWeightLoss === null) {
+        setWantsWeightLoss(Boolean(currentUser.wants_weight_loss));
+      }
+      if (currentUser.target_weight && !targetWeight) {
+        setTargetWeight(currentUser.target_weight);
+      }
+      if (currentUser.weight_loss_rate) {
+        setWeightLossRate(currentUser.weight_loss_rate);
+      }
+    } else if (currentUser?.name && !formData.name) {
+      setFormData(prev => ({ ...prev, name: currentUser.name }));
+    }
+  }, [currentUser]);
+
+  // BMR calculation (Mifflin-St Jeor equation)
+  const calculateBMR = (wt: number, ht: number, age: number, gen: string) => {
+    if (!wt || !ht || !age) return 0;
+    if (gen?.toLowerCase() === 'male') {
+      return Math.round((10 * wt) + (6.25 * ht) - (5 * age) + 5);
+    }
+    return Math.round((10 * wt) + (6.25 * ht) - (5 * age) - 161);
+  };
+
+  const getActivityMultiplier = (act: string) => {
+    const a = (act || '').toLowerCase();
+    if (a.includes('sedentary') || a.includes('low')) return 1.2;
+    if (a.includes('light')) return 1.375;
+    if (a.includes('moderate')) return 1.55;
+    if (a.includes('active') || a.includes('high')) return 1.725;
+    return 1.2;
+  };
+
+  const liveBMR = calculateBMR(Number(formData.weight), Number(formData.height), Number(formData.age), formData.gender);
+  const liveTDEE = Math.round(liveBMR * getActivityMultiplier(formData.activity_level));
+  const desiredDeficit = Math.round(weightLossRate * 1100);
+  const maxSafeDeficit = Math.round(liveTDEE * 0.30);
+  const effectiveDeficit = Math.min(desiredDeficit, maxSafeDeficit);
+  const clinicalFloor = formData.gender?.toLowerCase() === 'male' ? 1500 : 1200;
+  const liveCalorieTarget = Math.max(clinicalFloor, liveTDEE - effectiveDeficit);
+  const weightToLose = Math.max(0, Number(formData.weight) - (targetWeight ? Number(targetWeight) : Number(formData.weight)));
+  const estimatedWeeks = weightLossRate > 0 && weightToLose > 0 ? (weightToLose / weightLossRate).toFixed(1) : '0';
 
   // Speech Recognition Setup
   useEffect(() => {
@@ -697,13 +768,32 @@ export default function UserAssessment({ onSubmit, loading }: UserAssessmentProp
       return;
     }
 
+    if (wantsWeightLoss === null) {
+      alert('Please select whether you would like to manage/lose weight before continuing.');
+      return;
+    }
+
+    if (wantsWeightLoss === true) {
+      if (!targetWeight || Number(targetWeight) <= 0) {
+        alert('Please specify your Target Weight in kilograms for the weight-loss plan.');
+        return;
+      }
+      if (Number(targetWeight) >= Number(formData.weight)) {
+        alert(`Target weight (${targetWeight} kg) must be lower than your current weight (${formData.weight} kg) for a weight-loss plan.`);
+        return;
+      }
+    }
+
     const cleanSubmission = {
       ...formData,
       age: Number(formData.age),
       height: Number(formData.height),
       weight: Number(formData.weight),
       daily_food_budget: Number(formData.daily_food_budget),
-      sleep_hours: formData.sleep_hours ? Number(formData.sleep_hours) : 7.5
+      sleep_hours: formData.sleep_hours ? Number(formData.sleep_hours) : 7.5,
+      wants_weight_loss: wantsWeightLoss === true,
+      target_weight: wantsWeightLoss && targetWeight ? Number(targetWeight) : undefined,
+      weight_loss_rate: wantsWeightLoss ? Number(weightLossRate) : 0.5
     };
     onSubmit(cleanSubmission);
   };
@@ -1830,6 +1920,213 @@ export default function UserAssessment({ onSubmit, loading }: UserAssessmentProp
               )}
             </div>
           </div>
+        </div>
+
+        {/* Step 5: Ask Whether the User Wants Weight Loss */}
+        <div className="pt-6 border-t border-slate-200 space-y-4">
+          <div className="p-5 rounded-3xl bg-gradient-to-r from-emerald-50 via-teal-50 to-sky-50 border border-emerald-200 shadow-xs">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2.5 rounded-2xl bg-emerald-600 text-white shadow-xs">
+                <Sparkles className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">
+                  Weight-Loss &amp; Calorie Management
+                </h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Would you like to manage your weight or lose weight?
+                </p>
+              </div>
+            </div>
+
+            {/* Selection Options */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+              <button
+                type="button"
+                onClick={() => setWantsWeightLoss(true)}
+                className={`p-4 rounded-2xl border-2 text-left transition-all ${
+                  wantsWeightLoss === true
+                    ? 'border-emerald-600 bg-white shadow-md shadow-emerald-600/10'
+                    : 'border-slate-200 bg-white/70 hover:bg-white text-slate-700'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-extrabold text-xs text-emerald-950">
+                    Yes &ndash; I want to lose weight.
+                  </span>
+                  {wantsWeightLoss === true && (
+                    <span className="h-3 w-3 rounded-full bg-emerald-600 ring-4 ring-emerald-100" />
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Enable calorie estimation, BMR/TDEE calculation, and safe deficit-aligned meal planning.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setWantsWeightLoss(false)}
+                className={`p-4 rounded-2xl border-2 text-left transition-all ${
+                  wantsWeightLoss === false
+                    ? 'border-emerald-600 bg-white shadow-md shadow-emerald-600/10'
+                    : 'border-slate-200 bg-white/70 hover:bg-white text-slate-700'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-extrabold text-xs text-slate-800">
+                    No &ndash; I only want nutrient deficiency prediction and personalized nutrition.
+                  </span>
+                  {wantsWeightLoss === false && (
+                    <span className="h-3 w-3 rounded-full bg-emerald-600 ring-4 ring-emerald-100" />
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Continue with existing nutrient deficiency prediction workflow without changes.
+                </p>
+              </button>
+            </div>
+          </div>
+
+          {/* Conditional Weight-Loss Assessment Card (Only when Yes is selected) */}
+          {wantsWeightLoss === true && (
+            <div className="p-6 rounded-3xl bg-white border border-emerald-300 shadow-sm space-y-5 animate-in fade-in">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-xs font-black text-emerald-900 uppercase tracking-wider flex items-center gap-1.5">
+                  <Sparkles className="h-4 w-4 text-emerald-600" /> Weight-Loss Assessment &amp; Calorie Target
+                </span>
+                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-extrabold px-2.5 py-1 rounded-full">
+                  Enabled
+                </span>
+              </div>
+
+              {/* Display Reused Profile Data (No Double Entry) */}
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="font-bold text-slate-700">Reused From Profile (Zero Re-Entry):</span>
+                  <span className="text-emerald-700 text-[10px] font-bold">✓ Automatically Synchronized</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5 text-[11px]">
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Age: <b>{formData.age ? `${formData.age} yrs` : '—'}</b>
+                  </span>
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Gender: <b>{formData.gender || '—'}</b>
+                  </span>
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Height: <b>{formData.height ? `${formData.height} cm` : '—'}</b>
+                  </span>
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Current Weight: <b>{formData.weight ? `${formData.weight} kg` : '—'}</b>
+                  </span>
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Activity: <b>{formData.activity_level || '—'}</b>
+                  </span>
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Dietary: <b>{formData.diet_type || '—'}</b>
+                  </span>
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Region: <b>{formData.region || '—'}</b>
+                  </span>
+                  <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-slate-700 font-semibold shadow-xs">
+                    Allergies: <b>{formData.allergies.length ? formData.allergies.join(', ') : 'None'}</b>
+                  </span>
+                </div>
+              </div>
+
+              {/* Weight-Loss Specific Inputs */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Target Weight (kg) <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="30"
+                    max={formData.weight ? Number(formData.weight) - 0.5 : 300}
+                    step="0.5"
+                    value={targetWeight}
+                    onChange={e => setTargetWeight(e.target.value ? Number(e.target.value) : '')}
+                    placeholder={`e.g. ${formData.weight ? Math.max(30, Number(formData.weight) - 5) : 60}`}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white focus:border-emerald-500"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-1 block">
+                    Must be realistic and lower than your current weight ({formData.weight || 0} kg).
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Preferred Rate of Weight Loss
+                  </label>
+                  <select
+                    value={weightLossRate}
+                    onChange={e => setWeightLossRate(Number(e.target.value))}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:bg-white focus:border-emerald-500"
+                  >
+                    <option value={0.25}>0.25 kg / week &ndash; Gentle &amp; Steady</option>
+                    <option value={0.5}>0.50 kg / week &ndash; Standard Safe (Recommended)</option>
+                    <option value={0.75}>0.75 kg / week &ndash; Active Pace</option>
+                    <option value={1.0}>1.00 kg / week &ndash; Maximum Clinical Limit</option>
+                  </select>
+                  <span className="text-[10px] text-slate-500 mt-1 block">
+                    Safe, evidence-based rate to preserve active lean muscle tissue.
+                  </span>
+                </div>
+              </div>
+
+              {/* Real-time Calorie Intake Prediction */}
+              {formData.weight && formData.height && formData.age && (
+                <div className="space-y-3 pt-3 border-t border-slate-100">
+                  <span className="text-[11px] font-extrabold text-slate-700 uppercase tracking-wider block">
+                    Validated Caloric Expenditure &amp; Safe Target:
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center">
+                    <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Basal Metabolic Rate</span>
+                      <span className="text-base font-black text-slate-900">{liveBMR}</span>
+                      <span className="text-[10px] text-slate-400 block">kcal / day (BMR)</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Daily Energy Needs</span>
+                      <span className="text-base font-black text-sky-800">{liveTDEE}</span>
+                      <span className="text-[10px] text-slate-400 block">kcal / day (TDEE)</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200">
+                      <span className="text-[10px] uppercase font-bold text-amber-700 block">Safe Daily Deficit</span>
+                      <span className="text-base font-black text-amber-900">-{effectiveDeficit}</span>
+                      <span className="text-[10px] text-amber-700 block">kcal / day</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-300">
+                      <span className="text-[10px] uppercase font-bold text-emerald-700 block">Recommended Target</span>
+                      <span className="text-base font-black text-emerald-900">{liveCalorieTarget}</span>
+                      <span className="text-[10px] text-emerald-700 block">kcal / day</span>
+                    </div>
+                  </div>
+
+                  {targetWeight && Number(targetWeight) < Number(formData.weight) && (
+                    <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200 flex flex-wrap justify-between items-center text-xs gap-2">
+                      <span className="font-bold text-emerald-900">
+                        Weight Goal: Lose {weightToLose} kg (from {formData.weight} kg to {targetWeight} kg)
+                      </span>
+                      <span className="text-emerald-700 font-extrabold bg-white px-3 py-1 rounded-full border border-emerald-200 shadow-xs">
+                        Estimated Duration: ~{estimatedWeeks} weeks
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[10px] text-slate-500 space-y-1">
+                    <p className="font-bold text-slate-700">Notice on Estimated Calorie Requirements vs. Medical Calorimetry:</p>
+                    <p className="italic leading-relaxed">
+                      Calorie requirements and energy expenditure are mathematical estimates calculated using the clinically validated Mifflin-St Jeor equation and standard activity factors. These values provide dietary guidance and are distinct from medically measured direct laboratory calorimetry. Extreme calorie restrictions are automatically prevented by clinical safety limits (minimum 1,200 kcal for women, 1,500 kcal for men). Always consult a healthcare professional before starting an intensive weight loss regimen.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Final Confirmation Button */}

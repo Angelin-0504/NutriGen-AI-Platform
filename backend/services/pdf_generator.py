@@ -122,6 +122,28 @@ class NutriGenPDFGenerator:
         ]))
         story.append(demo_table)
         story.append(Spacer(1, 15))
+
+        # 3b. Weight Management Section (if active)
+        if user_data.get('wants_weight_loss'):
+            story.append(Paragraph("Weight-Loss & Calorie Management Profile", self.h2_style))
+            target_wt = user_data.get('target_weight', user_data.get('weight', 0))
+            cal_tgt = user_data.get('calorie_target', 'Calibrated')
+            tdee_val = user_data.get('tdee', 'Calculated')
+            wl_rate = user_data.get('weight_loss_rate', 0.5)
+            wl_data = [
+                [Paragraph(f"<b>Current Weight:</b> {user_data.get('weight')} kg", self.body_style), Paragraph(f"<b>Target Weight:</b> {target_wt} kg", self.body_style)],
+                [Paragraph(f"<b>Daily Calorie Target:</b> {cal_tgt} kcal/day", self.body_style), Paragraph(f"<b>Estimated TDEE:</b> {tdee_val} kcal/day", self.body_style)],
+                [Paragraph(f"<b>Target Deficit Rate:</b> {wl_rate} kg/week", self.body_style), Paragraph("<b>Strategy:</b> Nutrient-Dense Deficit", self.body_style)]
+            ]
+            wl_table = Table(wl_data, colWidths=[265, 265])
+            wl_table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,-1), colors.HexColor("#f0fdf4")),
+                ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor("#86efac")),
+                ('PADDING', (0,0), (-1,-1), 8),
+                ('LINEBELOW', (0,0), (-1,-2), 0.5, colors.HexColor("#bbf7d0")),
+            ]))
+            story.append(wl_table)
+            story.append(Spacer(1, 15))
         
         # 4. Nutrient Deficiencies Analysis (Sorted by risk)
         story.append(Paragraph("Nutrient Deficiency Risks & Rankings", self.h2_style))
