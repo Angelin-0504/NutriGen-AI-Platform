@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { 
   Lock, Mail, User as UserIcon, AlertCircle, Loader2, CheckCircle2, 
   ArrowRight, ShieldCheck, X, Eye, EyeOff 
@@ -328,6 +329,26 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
             </span>
           )}
         </div>
+
+        {Capacitor.isNativePlatform() && (
+          <div className="px-4 py-2.5 bg-slate-100/90 border-t border-slate-200 text-[11px] text-slate-500 flex items-center justify-between">
+            <span className="truncate">Server: <strong className="text-slate-700">{localStorage.getItem('nutrigen_server_url') || 'http://10.27.77.56:8000'}</strong></span>
+            <button
+              type="button"
+              onClick={() => {
+                const current = localStorage.getItem('nutrigen_server_url') || 'http://10.27.77.56:8000';
+                const newUrl = prompt('Enter backend server address (e.g. http://10.27.77.56:8000):', current);
+                if (newUrl && newUrl.trim()) {
+                  localStorage.setItem('nutrigen_server_url', newUrl.trim());
+                  window.location.reload();
+                }
+              }}
+              className="text-emerald-700 font-bold hover:underline shrink-0 ml-2 cursor-pointer"
+            >
+              Change Server IP
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

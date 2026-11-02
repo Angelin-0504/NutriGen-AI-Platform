@@ -1,7 +1,24 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Capacitor } from '@capacitor/core';
 import './index.css';
 import App from './App.tsx';
+
+// Inside the native mobile app, 'localhost' refers to the mobile device itself.
+// Route all '/api/...' calls to the backend server on the local network.
+const DEFAULT_BACKEND_URL = 'http://10.27.77.56:8000';
+
+if (Capacitor.isNativePlatform()) {
+  const originalFetch = window.fetch;
+  window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
+    if (typeof input === 'string' && input.startsWith('/api')) {
+      const server = localStorage.getItem('nutrigen_server_url') || DEFAULT_BACKEND_URL;
+      const cleanServer = server.replace(/\/+$/, '');
+      input = `${cleanServer}${input}`;
+    }
+    return originalFetch(input, init);
+  };
+}
 
 interface Props {
   children: ReactNode;

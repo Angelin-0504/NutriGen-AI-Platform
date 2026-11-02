@@ -11,7 +11,7 @@
     "cap:sync": "cap sync",
     "cap:build": "npm run build && cap sync",
     "cap:open:android": "cap open android",
-    "apk:build": "npm run cap:build && cd android && .\\gradlew.bat assembleDebug"
+    "apk:build": "npm run cap:build && cd android && cmd /c \"set JAVA_HOME=C:\\Program Files\\Android\\Android Studio\\jbr&& gradlew.bat assembleDebug\""
   },
   "dependencies": {
     "@capacitor/android": "^8.6.0",
