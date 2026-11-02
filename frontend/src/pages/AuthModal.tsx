@@ -332,12 +332,12 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
 
         {Capacitor.isNativePlatform() && (
           <div className="px-4 py-2.5 bg-slate-100/90 border-t border-slate-200 text-[11px] text-slate-500 flex items-center justify-between">
-            <span className="truncate">Server: <strong className="text-slate-700">{localStorage.getItem('nutrigen_server_url') || 'http://10.27.77.56:8000'}</strong></span>
+            <span className="truncate">Server: <strong className="text-slate-700">{localStorage.getItem('nutrigen_server_url') || 'http://192.168.29.88:8000'}</strong></span>
             <button
               type="button"
               onClick={() => {
-                const current = localStorage.getItem('nutrigen_server_url') || 'http://10.27.77.56:8000';
-                const newUrl = prompt('Enter backend server address (e.g. http://10.27.77.56:8000):', current);
+                const current = localStorage.getItem('nutrigen_server_url') || 'http://192.168.29.88:8000';
+                const newUrl = prompt('Enter backend server address (e.g. http://192.168.29.88:8000):', current);
                 if (newUrl && newUrl.trim()) {
                   localStorage.setItem('nutrigen_server_url', newUrl.trim());
                   window.location.reload();

@@ -6,7 +6,7 @@ import App from './App.tsx';
 
 // Inside the native mobile app, 'localhost' refers to the mobile device itself.
 // Route all '/api/...' calls to the backend server on the local network.
-const DEFAULT_BACKEND_URL = 'http://10.27.77.56:8000';
+const DEFAULT_BACKEND_URL = 'http://192.168.29.88:8000';
 
 if (Capacitor.isNativePlatform()) {
   const originalFetch = window.fetch;
